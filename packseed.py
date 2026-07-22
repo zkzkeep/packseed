@@ -27,7 +27,17 @@ CFG = {
     "QB_URL":       os.environ.get("QB_URL", "http://qbittorrent:8080"),  # 搜索下载的目标下载器
     "QB_USER":      os.environ.get("QB_USER", "admin"),
     "QB_PASS":      os.environ.get("QB_PASS", ""),
-    "QB_CATEGORY":  os.environ.get("QB_CATEGORY", ""),     # 下载分类，留空则不设
+    "QB_CATEGORY":  os.environ.get("QB_CATEGORY", ""),     # 兜底分类，留空则按识别的类型(电影/电视剧/动漫)
+    # —— 整理器（识别+刮削入库）——
+    "TMDB_KEY":     os.environ.get("TMDB_KEY", ""),
+    "TMDB_PROXY":   os.environ.get("TMDB_PROXY", ""),      # TMDB 走代理(国内需要)，如 http://x:7890
+    "MEDIA_TV":     os.environ.get("MEDIA_TV", "/data/media/tv"),
+    "MEDIA_MOVIE":  os.environ.get("MEDIA_MOVIE", "/data/media/movies"),
+    "MEDIA_ANIME":  os.environ.get("MEDIA_ANIME", ""),     # 动漫库根，留空则动漫也归到 tv
+    "EMBY_URL":     os.environ.get("EMBY_URL", ""),
+    "EMBY_KEY":     os.environ.get("EMBY_KEY", ""),
+    "ORGANIZE":     os.environ.get("ORGANIZE", "1") == "1",  # 下载完成自动整理入库+转种
+    "TR_SEED_DIR":  os.environ.get("TR_SEED_DIR", ""),    # 转种到 tr 时的数据目录(容器内)，留空=用 qb 的保存目录
 }
 
 # ============ DB ============
@@ -64,6 +74,13 @@ def init_db():
         matched_name TEXT, mode TEXT, result TEXT, ts INTEGER)""")
     c.execute("""CREATE TABLE IF NOT EXISTS log(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, level TEXT, msg TEXT)""")
+    # 整理入库记录
+    c.execute("""CREATE TABLE IF NOT EXISTS media(
+        info_hash TEXT PRIMARY KEY, name TEXT, cat TEXT, mtype TEXT,
+        tmdbid INTEGER, tmdb_name TEXT, year TEXT, target TEXT,
+        conf TEXT, status TEXT, files INTEGER DEFAULT 0, ts INTEGER)""")
+    try: c.execute("ALTER TABLE media ADD COLUMN save TEXT")   # 下载内容的磁盘路径(content_path)
+    except Exception: pass
     c.commit(); c.close()
 
 def logmsg(level, msg):
@@ -186,18 +203,47 @@ class QB:
         body = r.read().decode("utf-8","ignore").strip()
         if not s.cookie and body != "Ok.":
             raise RuntimeError("qb 登录失败(账号密码?)")
-    def add(s, data, category=""):
-        if s.pw and not s.cookie: s.login()   # 有密码才登录；无密码=靠 qb 子网白名单免密
-        b = "----packseed" + str(int(time.time()*1000))
-        buf = [("--"+b+"\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"t.torrent\"\r\n"
-                "Content-Type: application/x-bittorrent\r\n\r\n").encode(), data, b"\r\n"]
-        if category:
-            buf.append(("--"+b+"\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\n"+category+"\r\n").encode())
-        buf.append(("--"+b+"--\r\n").encode())
-        headers = {"Referer":s.url,"Content-Type":"multipart/form-data; boundary="+b}
-        if s.cookie: headers["Cookie"] = s.cookie
-        req = urllib.request.Request(s.url+"/api/v2/torrents/add", data=b"".join(buf), headers=headers)
+    def _headers(s, extra=None):
+        if s.pw and not s.cookie: s.login()
+        h = {"Referer": s.url}
+        if s.cookie: h["Cookie"] = s.cookie
+        if extra: h.update(extra)
+        return h
+    def _post(s, path, params):
+        data = urllib.parse.urlencode(params).encode()
+        req = urllib.request.Request(s.url+path, data=data,
+              headers=s._headers({"Content-Type":"application/x-www-form-urlencoded"}))
+        return urllib.request.urlopen(req, timeout=30).read().decode("utf-8","ignore")
+    def _get(s, path):
+        req = urllib.request.Request(s.url+path, headers=s._headers())
+        return urllib.request.urlopen(req, timeout=30).read()
+    def add(s, data, category="", tags=""):
+        b = "----packseed" + str(int(time.time()*1000)); parts = []
+        def field(name, val):
+            parts.append(("--"+b+"\r\nContent-Disposition: form-data; name=\""+name+"\"\r\n\r\n"+val+"\r\n").encode())
+        parts.append(("--"+b+"\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"t.torrent\"\r\n"
+                      "Content-Type: application/x-bittorrent\r\n\r\n").encode()); parts.append(data); parts.append(b"\r\n")
+        if category: field("category", category)
+        if tags: field("tags", tags)
+        parts.append(("--"+b+"--\r\n").encode())
+        req = urllib.request.Request(s.url+"/api/v2/torrents/add", data=b"".join(parts),
+              headers=s._headers({"Content-Type":"multipart/form-data; boundary="+b}))
         return urllib.request.urlopen(req, timeout=40).read().decode("utf-8","ignore")
+    def torrents(s, **filt):
+        q = ("?"+urllib.parse.urlencode(filt)) if filt else ""
+        return json.loads(s._get("/api/v2/torrents/info"+q).decode("utf-8","ignore"))
+    def files(s, h):
+        return json.loads(s._get("/api/v2/torrents/files?hash="+h).decode("utf-8","ignore"))
+    def export(s, h):
+        return s._get("/api/v2/torrents/export?hash="+h)
+    def set_category(s, hashes, cat):
+        try: s._post("/api/v2/torrents/createCategory", {"category":cat})
+        except Exception: pass
+        return s._post("/api/v2/torrents/setCategory", {"hashes":hashes, "category":cat})
+    def add_tags(s, hashes, tags):
+        return s._post("/api/v2/torrents/addTags", {"hashes":hashes, "tags":tags})
+    def delete(s, hashes, delete_files=False):
+        return s._post("/api/v2/torrents/delete", {"hashes":hashes, "deleteFiles":"true" if delete_files else "false"})
 
 def human_size(n):
     n = float(n or 0)
@@ -205,6 +251,336 @@ def human_size(n):
         if n < 1024: return (f"{int(n)}{u}" if u == "B" else f"{n:.1f}{u}")
         n /= 1024
     return f"{n:.1f}PB"
+
+# ============ 名字解析 + TMDB 识别（整理器） ============
+CJK = re.compile(r'[一-鿿]')
+_CN_NUM = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10}
+_STOP = re.compile(r'^(19\d{2}|20\d{2}|\d{3,4}[pi]|2160p|1080p|720p|x26[45]|h\.?26[45]|hevc|avc|'
+                   r'bluray|blu-ray|web-?dl|webrip|hdtv|remux|bdrip|dvdrip|uhd|hdr|dv|dts|ddp?\d|'
+                   r'truehd|flac|aac|atmos|nf|amzn|complete|proper|repack|internal|us|'
+                   r'国语|粤语|中字|中英|双语|国粤|简繁|字幕|内封|内嵌)$', re.I)
+_VIDEO_EXT = (".mkv",".mp4",".ts",".avi",".m2ts",".wmv",".mov",".flv",".rmvb",".iso")
+
+def _cn_num(s):
+    if s.isdigit(): return int(s)
+    if s == '十': return 10
+    if len(s)==2 and s[0]=='十': return 10+_CN_NUM.get(s[1],0)
+    if len(s)==2 and s[1]=='十': return _CN_NUM.get(s[0],0)*10
+    return _CN_NUM.get(s)
+def meta_year(n):
+    m = re.findall(r'(19\d{2}|20\d{2})', n); return m[0] if m else ""
+def meta_season(n):
+    m = re.search(r'S(\d{1,2})(?:-S?\d{1,2})?', n, re.I)
+    if m: return int(m.group(1))
+    m = re.search(r'第\s*([\d一二三四五六七八九十]+)\s*季', n)
+    if m: return _cn_num(m.group(1))
+    if re.search(r'Season\s?(\d+)', n, re.I): return int(re.search(r'Season\s?(\d+)', n, re.I).group(1))
+    if re.search(r'E\d{1,3}|EP\d+|\d+集', n): return 1
+    return None
+def meta_is_tv(n):
+    return bool(re.search(r'(S\d{1,2}(?![0-9])|Season\s?\d|第[\d一二三四五六七八九十]+季|E\d{1,3}|EP\d+|\d+集|集全|全\d+集|complete\s+series)', n, re.I))
+def meta_is_anime(n):
+    # 启发式：常见番组字幕组/来源标记，或番组括号命名能解析出标题
+    return bool(re.search(r'\b(baha|bahamut|ani|vcb-studio|nc-raws|sweetsub|lolihouse|喵萌|animes?|'
+                          r'jitaku|ohys|leopard-raws|erai-raws|subsplease|horriblesubs|philosophy-raws|'
+                          r'桜都|千夏|澄空|华盟|极影|悠哈|幻樱|白恋|风车|雪飘|星空|黒ネズミたち|北宇治)\b', n, re.I)
+                or re.search(r'\[[^\]]+\].*\[\d{2,3}(v\d)?\]', n)          # [组]...[集号]
+                or (n[:1] in "[【" and _anime_title(n) != ("", "")))       # 番组命名解析成功
+def meta_title_cn(n):
+    first = re.split(r'[._]', n, maxsplit=1)[0]; first = re.split(r'[￡@]', first)[0].strip().strip('[]【】()（） ')
+    if CJK.search(first):
+        t = re.split(r'(S\d{1,2}|第[\d一二三四五六七八九十]+季|Season|E\d{1,3}|\d+集)', first, flags=re.I)[0]
+        t = re.sub(r'[A-Za-z].*$','',t).strip() if CJK.search(t) else t
+        if t.strip(): return t.strip()
+    return ""
+def meta_title_en(n):
+    s = re.sub(r'[一-鿿]',' ', re.sub(r'[._]+',' ', re.split(r'[￡@]', n)[0])); out=[]
+    for tok in s.split():
+        if not re.search(r'[A-Za-z]',tok):
+            if out: break
+            continue
+        if _STOP.match(tok) or re.match(r'^S\d{1,2}',tok,re.I) or re.match(r'^E\d{1,3}$',tok,re.I):
+            if out: break
+            continue
+        out.append(tok)
+    while out and out[-1].lower()=='the': out.pop()
+    return ' '.join(out[:6]).strip()
+
+_ANIME_JUNK = re.compile(r'^(\d{1,4}(-\d{1,4})?(v\d)?|(19|20)\d{2}[-.]?\d{0,4}|.*\d{3,4}[pP].*|WEB.?(DL|RIP)?.*|BD(RIP|BOX)?.*|'
+                         r'x?26[45].*|HEVC.*|AVC.*|AAC.*|FLAC.*|OPUS.*|MKV|MP4|GB|BIG5|JP(SC|TC)?|SC|TC|CHT|CHS|'
+                         r'简繁.*|繁[體体]?.*|简[体日]?.*|招募.*|\d{1,2}月新番.*|★.*|新番.*|合集|全集|完结|字幕.*|'
+                         r'Fin|END|S\d{1,2}|Season\s?\d+|OVA\d*|OAD|SP\d*|Movie|剧场版|檢索.*|V\d|'
+                         r'国漫|日漫|美漫|港漫|漫画改?|轻改|游戏改)$', re.I)
+
+def _anime_title(n):
+    """番组命名：[组] 标题 [01-24] / 【组】【标题】[话数] / [组] Title - 01 (1080p)。
+    返回 (中文题, 英文/罗马字题)；识别不了返回 ("","")"""
+    segs = [a or b for a, b in re.findall(r'\[([^\[\]]+)\]|【([^【】]+)】', n)]
+    if len(segs) < 2 and not re.search(r'\]\s*[^\[\]]+\s*-\s*\d{1,3}', n):
+        return "", ""      # 不是典型番组命名(如 [福贵].Fu.Gui 这种走普通解析)
+    # 括号外的裸文本(如 "[SubsPlease] Sousou no Frieren - 28 (1080p)" 的中段)
+    bare = re.sub(r'\[[^\[\]]*\]|【[^【】]*】|\([^()]*\)', ' ', n).strip(' ★-_')
+    cands = ([bare] if bare else []) + segs[1:]   # 第一个括号通常是字幕组，跳过
+    for seg in cands:
+        seg = seg.replace('_', ' ').strip(' ★-')
+        seg = re.sub(r'\s*[-–]\s*\d{1,4}(\.\d)?(v\d)?\s*(END|Fin)?\s*$', '', seg, flags=re.I)  # 去尾部话数 " - 01"/" - 1071"
+        seg = re.sub(r'\s*第?\d{1,4}[-~]\d{1,4}[话話集]?(\+.*)?$', '', seg)                      # 去 "01-24话"
+        seg = re.sub(r'\s*第\d{1,4}[话話集]$', '', seg)                                          # 去 "第1123话"
+        seg = re.sub(r'\s*(第[\d一二三四五六七八九十]+季|\d+(st|nd|rd|th)\s+Season|Season\s?\d+|Part\s?\d+|S\d{1,2})\s*$', '', seg, flags=re.I)  # 去 "第二季"/"Season 2"
+        seg = seg.strip(' ★-')
+        if not seg or _ANIME_JUNK.match(seg): continue
+        # 中英双语段 "夏日重现/Summer Time Rendering" 或 "葬送的芙莉莲 Sousou no Frieren"
+        if '/' in seg:
+            parts = [p.strip() for p in seg.split('/') if p.strip()]
+            cn = next((p for p in parts if CJK.search(p)), "")
+            en = next((p for p in parts if p and not CJK.search(p)), "")
+            return cn, en
+        if CJK.search(seg):
+            mixed = re.match(r'^([^\sA-Za-z]*[一-鿿][^A-Za-z]*)\s+([A-Za-z].*)$', seg)
+            if mixed: return mixed.group(1).strip(), mixed.group(2).strip()
+            return seg, ""
+        return "", seg
+    return "", ""
+
+def _tmdb_call(path, **params):
+    params["api_key"] = CFG["TMDB_KEY"]
+    u = "https://api.themoviedb.org/3" + path + "?" + urllib.parse.urlencode(params)
+    op = urllib.request.build_opener(urllib.request.ProxyHandler(
+        {"http":CFG["TMDB_PROXY"],"https":CFG["TMDB_PROXY"]})) if CFG["TMDB_PROXY"] else urllib.request.build_opener()
+    return json.load(op.open(u, timeout=20))
+def _tmdb_search(q, tv_only=False):
+    try:
+        if tv_only:   # 确定是剧集时用 tv 专用端点：排序更准，长寿番(如1999海贼王)不会被剧场版淹没
+            rs = _tmdb_call("/search/tv", query=q, language="zh-CN").get("results", [])
+            for r in rs: r["media_type"] = "tv"
+            if rs: return rs
+        return [r for r in _tmdb_call("/search/multi", query=q, language="zh-CN", include_adult="false").get("results",[])
+                if r.get("media_type") in ("movie","tv")]
+    except Exception:
+        return []
+def _ryear(r): return (r.get("release_date") or r.get("first_air_date") or "")[:4]
+
+def tmdb_match(name):
+    """解析 name → 匹配 TMDB。返回 dict(mtype,id,tmdb_name,year,conf,q) 或 None"""
+    if not CFG["TMDB_KEY"]: return None
+    tc, te = _anime_title(name)          # 番组命名优先(动漫)
+    if not (tc or te):
+        tc, te = meta_title_cn(name), meta_title_en(name)
+    year = meta_year(name)
+    # 名字里带集数/季标记 → 明确是剧集，别让剧场版/总集篇/舞台剧抢走匹配
+    want_tv = bool(re.search(r'\[\d{1,4}(-\d{1,4})?(v\d)?\]|第\d{1,4}[话話集]|[-–]\s*\d{1,4}\s*[\[\(]|'
+                             r'S\d{1,2}(?!\d)|E\d{1,3}|\d+集', name) or meta_is_tv(name))
+    for q in [x for x in (tc, te) if x]:
+        cand = _tmdb_search(q, tv_only=want_tv)
+        if not cand: continue
+        if want_tv and any(r.get("media_type") == "tv" for r in cand):
+            cand = [r for r in cand if r.get("media_type") == "tv"]
+        if meta_is_anime(name):                                 # 动漫优先"动画"类型(如 One Piece 别配到真人版)
+            ani = [r for r in cand if 16 in (r.get("genre_ids") or [])]
+            if ani: cand = ani
+        # 话数很大(≥50)=长寿番，同名候选取最早开播的(如 One Piece 1071 → 1999 原版而非重制版)
+        epm = (re.search(r'[-–]\s*(\d{2,4})(?:v\d)?\s*(?:[\[\(]|$)', name)
+               or re.search(r'第(\d{1,4})[话話集]', name)
+               or re.search(r'\[(?!(?:19|20)\d{2}\])(\d{2,3})(?:v\d)?\]', name))
+        big_ep = epm and int(epm.group(1)) >= 50
+        if big_ep and len(cand) > 1:
+            cand.sort(key=lambda r: (_ryear(r) or "9999"))
+        else:
+            cand.sort(key=lambda r: -(r.get("popularity") or 0))   # 正片热度远高于总集篇/衍生
+        # 优先级：名字准+年份准 > 年份准 > 仅名字准(兜住"请回答1988"这种解析出错年份的) > 首位候选
+        exact = [r for r in cand if (r.get("name") or r.get("title")) == q]
+        if year:
+            ye = [r for r in cand if _ryear(r) == year]
+            exact_ye = [r for r in ye if r in exact]
+            if exact_ye: pick = (exact_ye[0], "high")
+            elif ye:     pick = (ye[0], "high")
+            elif exact:  pick = (exact[0], "high")
+            else:        pick = (cand[0], "low")
+        else:
+            pick = (exact[0], "high") if exact else (cand[0], "mid")
+        r, conf = pick
+        if conf=="low" and q==tc and te and te.lower()!=tc.lower(): continue  # 中文低置信→再试英文
+        return {"mtype":"tv" if r.get("media_type")=="tv" else "movie","id":r.get("id"),
+                "tmdb_name":(r.get("name") or r.get("title")),"year":_ryear(r),"conf":conf,"q":q}
+    return None
+
+def tmdb_by_id(tid, mtype_hint=""):
+    order = ["movie","tv"] if mtype_hint == "movie" else ["tv","movie"]
+    for mt in order:
+        try:
+            d = _tmdb_call(f"/{mt}/{tid}", language="zh-CN")
+            if d.get("id"):
+                return {"mtype":mt,"id":d["id"],"tmdb_name":(d.get("name") or d.get("title")),
+                        "year":(d.get("first_air_date") or d.get("release_date") or "")[:4],"conf":"manual","q":str(tid)}
+        except Exception: pass
+    return None
+
+def media_category(name, m):
+    """qb 分类：动漫 > 电视剧 > 电影"""
+    if meta_is_anime(name): return "动漫"
+    if m: return "电视剧" if m["mtype"]=="tv" else "电影"
+    return "电视剧" if meta_is_tv(name) else "电影"
+
+def walk_files(path):
+    """把磁盘路径(文件或目录)展开成 [(绝对路径, 相对名)]"""
+    if os.path.isfile(path): return [(path, os.path.basename(path))]
+    out = []
+    for root, _, fs in os.walk(path):
+        for f in fs:
+            ap = os.path.join(root, f); out.append((ap, os.path.relpath(ap, path)))
+    return out
+
+# ============ 整理入库（硬链接） + 转种 + 通知 Emby ============
+def _safe(s): return re.sub(r'[\\/:*?"<>|]+',' ',(s or "")).strip()
+
+def organize_files(files, m, cat):
+    """files: [(绝对源路径, 相对路径)]；按类型硬链接进媒体库。返回(目标目录, 链接数)"""
+    folder = f"{_safe(m['tmdb_name'])} ({m['year']})" if m.get("year") else _safe(m['tmdb_name'])
+    if cat == "动漫" and CFG["MEDIA_ANIME"]: root = CFG["MEDIA_ANIME"]
+    elif m and m["mtype"] == "movie": root = CFG["MEDIA_MOVIE"]
+    else: root = CFG["MEDIA_TV"]
+    dest_dir = os.path.join(root, folder)
+    n = 0
+    for src, rel in files:
+        if os.path.splitext(rel)[1].lower() not in _VIDEO_EXT and not rel.lower().endswith((".srt",".ass",".sub")):
+            continue
+        dst = os.path.join(dest_dir, os.path.basename(rel))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.exists(dst): n += 1; continue
+        try:
+            os.link(src, dst); n += 1
+        except OSError as e:
+            logmsg("WARN", f"硬链接失败 {os.path.basename(rel)}: {e}")
+    return dest_dir, n
+
+def emby_refresh():
+    if not (CFG["EMBY_URL"] and CFG["EMBY_KEY"]): return
+    try:
+        req = urllib.request.Request(CFG["EMBY_URL"].rstrip("/") + "/emby/Library/Refresh?api_key=" + CFG["EMBY_KEY"], method="POST")
+        urllib.request.urlopen(req, timeout=15).read()
+    except Exception as e:
+        logmsg("WARN", f"通知 Emby 刷新失败: {e}")
+
+
+
+# ============ 全自动流水线：qb完成 → 识别整理入库 → 转种tr → 通知Emby ============
+def do_organize(ih, name, files, m, cat):
+    """执行硬链接入库并记录。files: [(绝对源路径, 相对路径)]"""
+    c = db()
+    c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+              (ih, name, cat, m["mtype"], m["id"], m["tmdb_name"], m["year"], "", m["conf"], "processing", len(files), int(time.time())))
+    c.commit(); c.close()
+    dest, n = organize_files(files, m, cat)
+    c = db(); c.execute("UPDATE media SET target=?, files=?, status='done' WHERE info_hash=?", (dest, n, ih)); c.commit(); c.close()
+    logmsg("INFO", f"入库 {m['tmdb_name']} ({m['year']}) ← {name[:36]} | {n}个文件 → {dest}")
+    emby_refresh()
+    return dest, n
+
+def hold_media(ih, name, cat, reason):
+    c = db()
+    c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+              (ih, name, cat, "", None, "", "", "", "", "hold", 0, int(time.time())))
+    c.commit(); c.close()
+    logmsg("WARN", f"整理待确认({reason}): {name[:44]}")
+
+def transfer_to_tr(qb, ih, name, save_path):
+    """qb→tr 转种：tr 指向同一数据目录，校验后从 qb 删任务(数据保留)"""
+    try:
+        data = qb.export(ih)
+        if data[:1] != b'd':
+            logmsg("WARN", f"转种失败(导出非种子) {name[:36]}"); return False
+        tr = TR(); resp = tr.add(data, save_path); args = resp.get("arguments", {})
+        added = args.get("torrent-added") or args.get("torrent-duplicate")
+        if added:
+            if added.get("id"):
+                try: tr.call("torrent-verify", {"ids": [added["id"]]})
+                except Exception: pass
+            qb.delete(ih, delete_files=False)
+            logmsg("INFO", f"转种 qb→tr 完成(数据保留): {name[:40]}")
+            return True
+        logmsg("WARN", f"转种 tr 拒绝 {name[:36]}: {resp.get('result')}")
+    except Exception as e:
+        logmsg("ERROR", f"转种异常 {name[:30]}: {e}")
+    return False
+
+def process_completed(qb, t):
+    """qb 一个种子下载完成后的全套处理"""
+    ih = t["hash"]; name = t["name"]; sp = t["save_path"]
+    try:
+        files = [(os.path.join(sp, f["name"]), f["name"]) for f in qb.files(ih)]
+    except Exception as e:
+        logmsg("ERROR", f"取qb文件列表失败 {name[:30]}: {e}"); return
+    m = tmdb_match(name)
+    cat = media_category(name, m)
+    if m and m["conf"] in ("high", "mid"):
+        try:
+            do_organize(ih, name, files, m, cat)
+        except Exception as e:
+            logmsg("ERROR", f"入库异常 {name[:30]}: {e}")
+            c = db(); c.execute("UPDATE media SET status='error' WHERE info_hash=?", (ih,)); c.commit(); c.close()
+    else:
+        hold_media(ih, name, cat, "识别置信度不足" if m else "TMDB无匹配")
+    transfer_to_tr(qb, ih, name, sp)
+
+def manual_organize(ih, query):
+    """待确认条目：用户给 TMDB id 或片名，重新匹配并入库。数据可能已转到 tr。"""
+    name = sp = None; files = []
+    try:
+        tr = TR()
+        t = next((x for x in tr.torrents() if x["hashString"].lower() == ih.lower()), None)
+        if t:
+            name = t["name"]; sp = t["downloadDir"]
+            files = [(os.path.join(sp, f["name"]), f["name"]) for f in t.get("files", [])]
+    except Exception: pass
+    if not files:
+        try:
+            qb = QB()
+            t = next((x for x in qb.torrents() if x["hash"].lower() == ih.lower()), None)
+            if t:
+                name = t["name"]; sp = t["save_path"]
+                files = [(os.path.join(sp, f["name"]), f["name"]) for f in qb.files(ih)]
+        except Exception: pass
+    if not files:
+        return {"ok": False, "err": "qb/tr 里都找不到该种子的文件"}
+    m = None
+    if query.isdigit():   # 纯数字 = TMDB id，剧/影都试
+        for mt in ("tv", "movie"):
+            try:
+                d = _tmdb_call(f"/{mt}/{query}", language="zh-CN")
+                if d.get("id"):
+                    m = {"mtype": mt, "id": d["id"], "tmdb_name": d.get("name") or d.get("title"),
+                         "year": (d.get("first_air_date") or d.get("release_date") or "")[:4], "conf": "manual", "q": query}
+                    break
+            except Exception: continue
+    else:                 # 否则当片名搜
+        cand = _tmdb_search(query)
+        if cand:
+            r = cand[0]
+            m = {"mtype": "tv" if r.get("media_type") == "tv" else "movie", "id": r.get("id"),
+                 "tmdb_name": r.get("name") or r.get("title"), "year": _ryear(r), "conf": "manual", "q": query}
+    if not m:
+        return {"ok": False, "err": "TMDB 查不到，试试直接填 TMDB id"}
+    cat = media_category(name or "", m)
+    dest, n = do_organize(ih, name or "", files, m, cat)
+    return {"ok": True, "name": f"{m['tmdb_name']} ({m['year']})", "n": n}
+
+def qb_watcher():
+    """每分钟看一眼 qb：有下载完成的就整理+转种。比 MP 的定时插件快，自然接管。"""
+    time.sleep(20)
+    while True:
+        try:
+            if CFG["ORGANIZE"] and CFG["TMDB_KEY"]:
+                qb = QB()
+                for t in qb.torrents():
+                    if t.get("progress", 0) < 1: continue
+                    ih = t["hash"]
+                    c = db(); row = c.execute("SELECT status FROM media WHERE info_hash=?", (ih,)).fetchone(); c.close()
+                    if row: continue          # done/hold/error 都不重复自动处理，hold 走手动确认
+                    logmsg("INFO", f"qb 下载完成，整理+转种: {t['name'][:44]}")
+                    process_completed(qb, t)
+        except Exception as e:
+            logmsg("ERROR", f"qb监控异常: {e}")
+        time.sleep(60)
 
 # ============ Prowlarr ============
 def prowlarr_search(query):
@@ -382,6 +758,7 @@ a{color:var(--acc)}
 <div class=stat><div class=n>{{DONE}}</div><div class=l>有匹配的种子</div></div>
 <div class=stat><div class=n class=mut>{{NOMATCH}}</div><div class=l>无匹配</div></div>
 </div>
+<div class=card><h2>📥 整理入库 <span class=mut style=font-weight:400>· 下载完成自动识别→硬链接进 Emby 媒体库 · 待确认的可手动填 TMDB id/片名</span></h2><table><tr><th>下载名</th><th>分类</th><th>识别为</th><th>状态</th><th>目标/操作</th></tr>{{MEDIA}}</table></div>
 <div class=card><h2>种子辅种记录 <span class=mut style=font-weight:400>· 点种子名看来源站和辅种去向</span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>匹配</th><th class=r>注入</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
 <div class=card><h2>最近活动</h2><table><tr><th style=width:150px>时间</th><th>消息</th></tr>{{LOGS}}</table></div>
 <div class=sub style=text-align:center>PackSeed · 自制辅种 · 替代 cross-seed</div>
@@ -425,6 +802,15 @@ function dl(b,u){
   if(d.ok){b.textContent='✅ 已下';b.style.background='var(--ok)';toast('已推送到 qb 下载');}
   else{b.textContent='失败';b.disabled=false;toast('下载失败：'+(d.err||''));}
  }).catch(e=>{b.textContent='失败';b.disabled=false;toast('下载出错');});
+}
+function reid(h,el){
+ var inp=el.parentNode.querySelector('input');var v=inp.value.trim();
+ if(!v){inp.focus();return;}
+ clearTimeout(_t);el.disabled=true;el.textContent='入库中…';
+ fetch('/api/reid?hash='+encodeURIComponent(h)+'&q='+encodeURIComponent(v))
+  .then(r=>r.json()).then(d=>{if(d.ok){toast('已入库：'+(d.name||''));setTimeout(()=>location.reload(),1500);}
+   else{toast('失败：'+(d.err||''));el.disabled=false;el.textContent='确认入库';}})
+  .catch(e=>{toast('出错');el.disabled=false;el.textContent='确认入库';});
 }
 </script></body></html>"""
 
@@ -487,6 +873,8 @@ class Handler(BaseHTTPRequestHandler):
             s._search(); return
         if s.path.startswith("/api/dl"):
             s._dl(); return
+        if s.path.startswith("/api/reid"):
+            s._reid(); return
         if s.path.startswith("/api"):
             s._json(); return
         c = db()
@@ -504,6 +892,22 @@ class Handler(BaseHTTPRequestHandler):
                      f"<td><span class=src>{esc(r[6] or '?')}</span></td><td class=mut>{esc(r[1])}</td>"
                      f"<td class=r>{r[2]}</td><td class='r' style='color:var(--ok)'>{r[3]}</td>"
                      f"<td><span class='b {st}'>{label}</span></td><td>{manual}</td></tr>")
+        # 整理入库记录
+        media_rows = ""
+        cmap = {"电影":"🎬","电视剧":"📺","动漫":"🎌"}
+        smap = {"done":("已入库","done"),"hold":("待确认","nomatch"),"processing":("处理中","searching"),"error":("出错","err"),"skip":("跳过","nomatch")}
+        for r in c.execute("SELECT info_hash,name,cat,tmdb_name,year,status,target FROM media ORDER BY ts DESC LIMIT 60").fetchall():
+            ih,nm,cat,tn,yr,stt,tgt = r
+            lbl,cls = smap.get(stt,(stt,"err"))
+            if stt == "hold":
+                fix = f"<div class=rs><input placeholder='TMDB id 或 片名' value=''><button onclick=\"reid('{esc(ih)}',this)\">确认入库</button></div>"
+            elif stt == "done":
+                fix = f"<span class=mut title='{esc(tgt or '')}'>{esc((tgt or '').rsplit('/',1)[-1])}</span>"
+            else: fix = ""
+            media_rows += (f"<tr><td class=name title='{esc(nm)}'>{esc(nm)}</td>"
+                           f"<td>{cmap.get(cat,'')}{esc(cat or '')}</td>"
+                           f"<td>{esc((tn+' ('+(yr or '')+')') if tn else '—')}</td>"
+                           f"<td><span class='b {cls}'>{esc(lbl)}</span></td><td>{fix}</td></tr>")
         logs = ""
         for r in c.execute("SELECT ts,level,msg FROM log ORDER BY id DESC LIMIT 40").fetchall():
             logs += f"<tr><td class=mut>{time.strftime('%m-%d %H:%M:%S', time.localtime(r[0]))}</td><td>{esc(r[2])}</td></tr>"
@@ -512,6 +916,7 @@ class Handler(BaseHTTPRequestHandler):
                     .replace("{{TOTAL}}", str(t_total)).replace("{{INJECT}}", str(t_inject))
                     .replace("{{DONE}}", str(t_done)).replace("{{NOMATCH}}", str(t_nomatch))
                     .replace("{{ROWS}}", rows or "<tr><td colspan=7 class=mut>暂无记录，等待首次扫描…</td></tr>")
+                    .replace("{{MEDIA}}", media_rows or "<tr><td colspan=5 class=mut>暂无入库记录</td></tr>")
                     .replace("{{LOGS}}", logs or "<tr><td colspan=2 class=mut>—</td></tr>"))
         b = html.encode("utf-8")
         s.send_response(200); s.send_header("Content-Type","text/html; charset=utf-8"); s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b)
@@ -551,6 +956,15 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(s, obj):
         b = json.dumps(obj, ensure_ascii=False).encode()
         s.send_response(200); s.send_header("Content-Type","application/json; charset=utf-8"); s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b)
+    def _reid(s):
+        from urllib.parse import urlparse, parse_qs
+        q = parse_qs(urlparse(s.path).query)
+        h = (q.get("hash",[""])[0]).strip(); v = (q.get("q",[""])[0]).strip()
+        if not (h and v): s._send_json({"ok":False,"err":"参数缺失"}); return
+        try:
+            s._send_json(manual_organize(h, v))
+        except Exception as e:
+            logmsg("ERROR", f"手动入库异常: {e}"); s._send_json({"ok":False,"err":str(e)[:80]})
     def _search(s):
         from urllib.parse import urlparse, parse_qs
         q = (parse_qs(urlparse(s.path).query).get("q",[""])[0]).strip()
@@ -574,11 +988,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = prowlarr_download(u)
             if data[:1] != b'd': s._send_json({"ok":False,"err":"返回的不是种子文件"}); return
-            res = QB().add(data, CFG["QB_CATEGORY"])
-            ok = "Ok" in res
             try: cname, _ = torrent_files(data)
             except Exception: cname = ""
-            logmsg("INFO", f"搜索下载 → qb: {(cname or u)[:44]} [{res.strip()[:16] or 'ok'}]")
+            cat = CFG["QB_CATEGORY"] or media_category(cname or "", None)   # 快速启发式分类，流水线再校正
+            res = QB().add(data, category=cat, tags="packseed")
+            ok = "Ok" in res
+            logmsg("INFO", f"搜索下载 → qb[{cat}]: {(cname or u)[:40]} [{res.strip()[:16] or 'ok'}]")
             s._send_json({"ok":ok, "err":"" if ok else (res[:60] or "qb 拒绝")})
         except Exception as e:
             logmsg("ERROR", f"搜索下载失败: {e}"); s._send_json({"ok":False,"err":str(e)[:80]})
@@ -587,8 +1002,10 @@ def esc(t): return (t or "").replace("&","&amp;").replace("<","&lt;").replace(">
 
 def main():
     init_db()
-    logmsg("INFO", f"PackSeed 启动，监听 {CFG['PORT']}，扫描间隔 {CFG['SCAN_INTERVAL']}s")
+    org = "开" if CFG["ORGANIZE"] and CFG["TMDB_KEY"] else "关"
+    logmsg("INFO", f"PackSeed 启动，监听 {CFG['PORT']}，扫描间隔 {CFG['SCAN_INTERVAL']}s，整理入库[{org}]")
     threading.Thread(target=scanner, daemon=True).start()
+    threading.Thread(target=qb_watcher, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", CFG["PORT"]), Handler).serve_forever()
 
 if __name__ == "__main__":
