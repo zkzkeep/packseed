@@ -13,6 +13,7 @@ cross-seed 依赖 release 命名规范来匹配。遇到 PT 站常见的中文�
 ## 特性
 
 - 🎯 **按内容比对辅种**：体积预筛（±0.3%）+ 文件列表精确比对，不解析文件名，多季合集包也能辅
+- 🔎 **搜索下载**：面板里输入剧名/片名，全站搜索、按做种数排序，一键下载到 qBittorrent
 - 🔍 **中英双关键词**：中文名优先搜索，搜不到自动回退英文名
 - 🖥️ **Web 面板**：辅种记录、统计、日志一览；点进种子看**来源站**和**辅种去向**
 - ✋ **手动兜底**：辅不上的可以自定义关键词重新触发搜索
@@ -89,11 +90,15 @@ python3 packseed.py
 | `PORT` | `2470` | Web 端口 |
 | `DB_PATH` | `/config/packseed.db` | sqlite 数据库路径 |
 | `PACKSEED_USER` / `PACKSEED_PASS` | 空 | Web 登录账号密码，**都设置**才启用 |
+| `QB_URL` | `http://qbittorrent:8080` | 搜索下载的目标 qBittorrent 地址 |
+| `QB_USER` / `QB_PASS` | `admin` / 空 | qb 账号密码；**留空则不登录**，靠 qb 的子网白名单免密（见下）|
+| `QB_CATEGORY` | 空 | 下载时给 qb 打的分类，留空不设 |
 
 ## 前置条件
 
 - **Prowlarr** 已接好你的各个 PT 站（PackSeed 复用它的站点列表，无需重复配置）
 - **Transmission** 做种，且 PackSeed 能通过 RPC 访问
+- **qBittorrent**（搜索下载功能需要）：可填账号密码，或在 qb「设置→WebUI→对 IP 子网白名单中的客户端跳过身份验证」里加上 Docker 内网段（如 `172.16.0.0/12`），PackSeed 免密连接更省事
 - `DATA_LINK_DIR` 和你的做种文件在**同一文件系统**（硬链接不能跨盘）
 
 ## 说明

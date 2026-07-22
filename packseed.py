@@ -24,6 +24,10 @@ CFG = {
     "DB":           os.environ.get("DB_PATH", "/config/packseed.db"),
     "AUTH_USER":    os.environ.get("PACKSEED_USER", ""),   # 设了才启用登录
     "AUTH_PASS":    os.environ.get("PACKSEED_PASS", ""),
+    "QB_URL":       os.environ.get("QB_URL", "http://qbittorrent:8080"),  # 搜索下载的目标下载器
+    "QB_USER":      os.environ.get("QB_USER", "admin"),
+    "QB_PASS":      os.environ.get("QB_PASS", ""),
+    "QB_CATEGORY":  os.environ.get("QB_CATEGORY", ""),     # 下载分类，留空则不设
 }
 
 # ============ DB ============
@@ -168,6 +172,40 @@ class TR:
     def add(s, torrent_bytes, download_dir):
         return s.call("torrent-add", {"metainfo":base64.b64encode(torrent_bytes).decode(),"download-dir":download_dir,"paused":False})
 
+# ============ qBittorrent WebUI（搜索下载的目标） ============
+class QB:
+    def __init__(s):
+        s.url = CFG["QB_URL"].rstrip("/"); s.user = CFG["QB_USER"]; s.pw = CFG["QB_PASS"]; s.cookie = ""
+    def login(s):
+        data = urllib.parse.urlencode({"username":s.user,"password":s.pw}).encode()
+        req = urllib.request.Request(s.url+"/api/v2/auth/login", data=data,
+              headers={"Referer":s.url,"Content-Type":"application/x-www-form-urlencoded"})
+        r = urllib.request.urlopen(req, timeout=15)
+        for h in (r.headers.get_all("Set-Cookie") or []):
+            if h.startswith("SID="): s.cookie = h.split(";",1)[0]
+        body = r.read().decode("utf-8","ignore").strip()
+        if not s.cookie and body != "Ok.":
+            raise RuntimeError("qb 登录失败(账号密码?)")
+    def add(s, data, category=""):
+        if s.pw and not s.cookie: s.login()   # 有密码才登录；无密码=靠 qb 子网白名单免密
+        b = "----packseed" + str(int(time.time()*1000))
+        buf = [("--"+b+"\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"t.torrent\"\r\n"
+                "Content-Type: application/x-bittorrent\r\n\r\n").encode(), data, b"\r\n"]
+        if category:
+            buf.append(("--"+b+"\r\nContent-Disposition: form-data; name=\"category\"\r\n\r\n"+category+"\r\n").encode())
+        buf.append(("--"+b+"--\r\n").encode())
+        headers = {"Referer":s.url,"Content-Type":"multipart/form-data; boundary="+b}
+        if s.cookie: headers["Cookie"] = s.cookie
+        req = urllib.request.Request(s.url+"/api/v2/torrents/add", data=b"".join(buf), headers=headers)
+        return urllib.request.urlopen(req, timeout=40).read().decode("utf-8","ignore")
+
+def human_size(n):
+    n = float(n or 0)
+    for u in ["B","KB","MB","GB","TB"]:
+        if n < 1024: return (f"{int(n)}{u}" if u == "B" else f"{n:.1f}{u}")
+        n /= 1024
+    return f"{n:.1f}PB"
+
 # ============ Prowlarr ============
 def prowlarr_search(query):
     u = CFG["PROWLARR_URL"] + "/api/v1/search?query=" + urllib.parse.quote(query) + "&type=search"
@@ -217,9 +255,10 @@ def run_match(tr, t, queries, manual=False):
                             except OSError: pass
                     dl_dir = CFG["DATA_LINK_DIR"]
                 try:
-                    resp = tr.add(data, dl_dir); rr = resp.get("result")
-                    if rr == "success": inj += 1; res = "injected"
-                    elif "torrent-duplicate" in resp.get("arguments", {}): res = "duplicate"
+                    resp = tr.add(data, dl_dir); rr = resp.get("result"); args = resp.get("arguments", {})
+                    # 注意：tr 对"新增"和"内容已存在"都返回 result=success，靠 arguments 里的键区分
+                    if "torrent-duplicate" in args: res = "duplicate"          # 该站种子已在做种，不算新注入
+                    elif "torrent-added" in args or rr == "success": inj += 1; res = "injected"
                     else: res = "inject_fail:"+str(rr)
                 except Exception: res = "inject_err"
                 c = db()
@@ -325,8 +364,18 @@ a{color:var(--acc)}
 .rs button:hover{opacity:.85}
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--acc);color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;opacity:0;transition:.3s;pointer-events:none}
 #toast.show{opacity:1}
+.searchbar{display:flex;gap:8px;padding:0 16px 12px}
+.searchbar input{flex:1;background:#0f1117;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:9px 12px;font-size:14px}
+.searchbar button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:9px 20px;font-size:14px;cursor:pointer}
+.searchbar button:hover{opacity:.85}
+.sname{max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dlbtn{background:var(--acc);color:#fff;border:0;border-radius:7px;padding:4px 14px;font-size:12px;cursor:pointer}
+.dlbtn:disabled{opacity:.7;cursor:default}
 </style></head><body><div class=wrap>
 <h1>🌱 PackSeed 辅种</h1><div class=sub>按文件清单精确比对辅种 · 每 {{INTERVAL}} 秒扫描一次 · 自动刷新 · 辅不上的可手动填关键词重搜</div>
+<div class=card><h2>🔍 搜索下载 <span class=mut style=font-weight:400>· 全站搜索，一键下到 qb</span></h2>
+<div class=searchbar><input id=q placeholder="输入剧名 / 电影名，回车搜索，如：无耻之徒" onkeydown="if(event.key=='Enter')doSearch()"><button onclick=doSearch()>搜索</button></div>
+<div id=sresult></div></div>
 <div class=stats>
 <div class=stat><div class=n>{{TOTAL}}</div><div class=l>已处理种子</div></div>
 <div class=stat><div class=n style=color:var(--ok)>{{INJECT}}</div><div class=l>累计辅种注入</div></div>
@@ -348,6 +397,35 @@ function research(h,el){
   .catch(e=>{toast('触发失败');el.disabled=false;el.textContent='重搜';});
 }
 function toast(m){var t=document.getElementById('toast');t.textContent=m;t.className='show';setTimeout(()=>t.className='',3000);}
+function doSearch(){
+ var q=document.getElementById('q').value.trim();if(!q)return;
+ clearTimeout(_t);
+ var box=document.getElementById('sresult');
+ box.innerHTML='<div class=mut style="padding:10px 16px">搜索中…（全站搜索约 30~60 秒，稍候）</div>';
+ fetch('/api/search?q='+encodeURIComponent(q)).then(r=>r.json()).then(function(d){
+  if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">搜索失败：'+(d.err||'')+'</div>';return;}
+  if(!d.results.length){box.innerHTML='<div class=mut style="padding:10px 16px">没搜到结果，换个关键词试试</div>';return;}
+  var tbl=document.createElement('table');
+  var hd=document.createElement('tr');hd.innerHTML='<th>标题</th><th>站点</th><th class=r>大小</th><th class=r>做种</th><th></th>';tbl.appendChild(hd);
+  d.results.forEach(function(x){
+   var tr=document.createElement('tr');
+   var c1=document.createElement('td');c1.className='sname';c1.title=x.title;c1.textContent=x.title;
+   var c2=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=x.site;c2.appendChild(sp);
+   var c3=document.createElement('td');c3.className='r';c3.textContent=x.sizeh;
+   var c4=document.createElement('td');c4.className='r';c4.textContent=x.seeders;
+   var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x.url);};c5.appendChild(b);
+   tr.appendChild(c1);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tr.appendChild(c5);tbl.appendChild(tr);
+  });
+  box.innerHTML='';box.appendChild(tbl);
+ }).catch(e=>{box.innerHTML='<div class=mut style="padding:10px 16px">搜索出错</div>';});
+}
+function dl(b,u){
+ b.disabled=true;b.textContent='下载中…';
+ fetch('/api/dl?url='+encodeURIComponent(u)).then(r=>r.json()).then(function(d){
+  if(d.ok){b.textContent='✅ 已下';b.style.background='var(--ok)';toast('已推送到 qb 下载');}
+  else{b.textContent='失败';b.disabled=false;toast('下载失败：'+(d.err||''));}
+ }).catch(e=>{b.textContent='失败';b.disabled=false;toast('下载出错');});
+}
 </script></body></html>"""
 
 DETAIL = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -405,6 +483,10 @@ class Handler(BaseHTTPRequestHandler):
             s._research(); return
         if s.path.startswith("/torrent"):
             s._detail(); return
+        if s.path.startswith("/api/search"):
+            s._search(); return
+        if s.path.startswith("/api/dl"):
+            s._dl(); return
         if s.path.startswith("/api"):
             s._json(); return
         c = db()
@@ -440,7 +522,8 @@ class Handler(BaseHTTPRequestHandler):
         t = c.execute("SELECT name,source,size,files,query,status,matched,injected FROM torrents WHERE info_hash=?", (h,)).fetchone()
         if not t:
             c.close(); s.send_response(404); s.end_headers(); s.wfile.write(b"not found"); return
-        ms = c.execute("SELECT indexer,matched_name,mode,result,ts FROM matches WHERE info_hash=? ORDER BY id", (h,)).fetchall()
+        # 每个目标站只显示一次，取最新一条(MAX(ts) 时 sqlite 会带出同一行的其它列)
+        ms = c.execute("SELECT indexer,matched_name,mode,result,MAX(ts) FROM matches WHERE info_hash=? GROUP BY indexer ORDER BY indexer", (h,)).fetchall()
         c.close()
         mrows = ""
         rmap = {"injected":"✅ 已注入做种","duplicate":"⚠️ 已存在","matched":"匹配","inject_err":"注入出错"}
@@ -465,6 +548,40 @@ class Handler(BaseHTTPRequestHandler):
     def _json(s):
         c = db(); data = {"torrents": [dict(zip(["name","query","matched","injected","status"], r)) for r in c.execute("SELECT name,query,matched,injected,status FROM torrents ORDER BY last_searched DESC LIMIT 200").fetchall()]}; c.close()
         b = json.dumps(data, ensure_ascii=False).encode(); s.send_response(200); s.send_header("Content-Type","application/json; charset=utf-8"); s.end_headers(); s.wfile.write(b)
+    def _send_json(s, obj):
+        b = json.dumps(obj, ensure_ascii=False).encode()
+        s.send_response(200); s.send_header("Content-Type","application/json; charset=utf-8"); s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b)
+    def _search(s):
+        from urllib.parse import urlparse, parse_qs
+        q = (parse_qs(urlparse(s.path).query).get("q",[""])[0]).strip()
+        if not q: s._send_json({"ok":False,"err":"关键词为空"}); return
+        try:
+            results = prowlarr_search(q)
+        except Exception as e:
+            logmsg("WARN", f"搜索下载查询失败[{q}]: {e}"); s._send_json({"ok":False,"err":str(e)[:80]}); return
+        out = []
+        for r in results:
+            url = r.get("downloadUrl") or r.get("guid") or ""
+            if not url: continue
+            out.append({"title": r.get("title",""), "site": r.get("indexer",""),
+                        "sizeh": human_size(r.get("size",0)), "seeders": r.get("seeders") or 0, "url": url})
+        out.sort(key=lambda x: x["seeders"], reverse=True)
+        s._send_json({"ok":True,"results":out[:80]})
+    def _dl(s):
+        from urllib.parse import urlparse, parse_qs
+        u = (parse_qs(urlparse(s.path).query).get("url",[""])[0]).strip()
+        if not u: s._send_json({"ok":False,"err":"缺少下载链接"}); return
+        try:
+            data = prowlarr_download(u)
+            if data[:1] != b'd': s._send_json({"ok":False,"err":"返回的不是种子文件"}); return
+            res = QB().add(data, CFG["QB_CATEGORY"])
+            ok = "Ok" in res
+            try: cname, _ = torrent_files(data)
+            except Exception: cname = ""
+            logmsg("INFO", f"搜索下载 → qb: {(cname or u)[:44]} [{res.strip()[:16] or 'ok'}]")
+            s._send_json({"ok":ok, "err":"" if ok else (res[:60] or "qb 拒绝")})
+        except Exception as e:
+            logmsg("ERROR", f"搜索下载失败: {e}"); s._send_json({"ok":False,"err":str(e)[:80]})
 
 def esc(t): return (t or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("'","&#39;")
 

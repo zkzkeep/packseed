@@ -21,6 +21,11 @@ services:
       - PROWLARR_KEY=CHANGE_ME_prowlarr_apikey
       - DATA_LINK_DIR=/data/cross-seed-links
       - SCAN_INTERVAL=1800
+      # 搜索下载的目标 qBittorrent（host 网络的 qb 用宿主机 IP，如 http://192.168.1.128:8080）
+      - QB_URL=http://qbittorrent:8080
+      # 若 qb 开了子网白名单免密，QB_USER/QB_PASS 可不填；否则填 qb 账号密码
+      # - QB_USER=admin
+      # - QB_PASS=CHANGE_ME_qb_password
       # 登录（都设置才启用；留空则免登录）
       - PACKSEED_USER=admin
       - PACKSEED_PASS=CHANGE_ME_web_password
