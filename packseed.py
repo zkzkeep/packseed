@@ -401,7 +401,8 @@ def tmdb_match(name):
         r, conf = pick
         if conf=="low" and q==tc and te and te.lower()!=tc.lower(): continue  # 中文低置信→再试英文
         return {"mtype":"tv" if r.get("media_type")=="tv" else "movie","id":r.get("id"),
-                "tmdb_name":(r.get("name") or r.get("title")),"year":_ryear(r),"conf":conf,"q":q}
+                "tmdb_name":(r.get("name") or r.get("title")),"year":_ryear(r),"conf":conf,"q":q,
+                "poster":r.get("poster_path") or "","overview":r.get("overview") or ""}
     return None
 
 def tmdb_by_id(tid, mtype_hint=""):
@@ -755,23 +756,54 @@ a{color:var(--acc)}
 .sname{max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dlbtn{background:var(--acc);color:#fff;border:0;border-radius:7px;padding:4px 14px;font-size:12px;cursor:pointer}
 .dlbtn:disabled{opacity:.7;cursor:default}
+.tabs{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap}
+.tabbtn{padding:8px 18px;border-radius:10px;background:var(--card);border:1px solid var(--line);color:var(--fg);text-decoration:none;font-size:14px}
+.tabbtn:hover{border-color:var(--acc)}.tabbtn.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+.tab{display:none}.tab.active{display:block}
+.grpsec{border-top:1px solid var(--line);margin-top:6px}
+.grp{display:flex;gap:14px;padding:14px 16px 6px;align-items:flex-start}
+.pos{width:64px;height:96px;object-fit:cover;border-radius:8px;background:#20232e;flex-shrink:0}
+.gt{font-size:15px;font-weight:700;margin-bottom:4px}
+.gov{font-size:12px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 </style></head><body><div class=wrap>
-<h1>🌱 PackSeed 辅种</h1><div class=sub>按文件清单精确比对辅种 · 每 {{INTERVAL}} 秒扫描一次 · 自动刷新 · 辅不上的可手动填关键词重搜</div>
-<div class=card><h2>🔍 搜索下载 <span class=mut style=font-weight:400>· 全站搜索，一键下到 qb</span></h2>
-<div class=searchbar><input id=q placeholder="输入剧名 / 电影名，回车搜索，如：无耻之徒" onkeydown="if(event.key=='Enter')doSearch()"><button onclick=doSearch()>搜索</button></div>
+<h1>🌱 PackSeed</h1><div class=sub>搜索下载 · 刮削入库 · 转种保种 · 全站辅种 —— 全自动</div>
+<div class=tabs>
+<a href="#search" class="tabbtn" data-t="search">🔍 搜索下载</a>
+<a href="#media" class="tabbtn" data-t="media">📥 整理入库</a>
+<a href="#seed" class="tabbtn" data-t="seed">🌱 辅种</a>
+<a href="#logs" class="tabbtn" data-t="logs">📋 日志</a>
+</div>
+<div id=tab-search class=tab>
+<div class=card><h2>🔍 搜索下载 <span class=mut style=font-weight:400>· 全站搜索 · 自动识别分组配海报 · 一键下到 qb</span></h2>
+<div class=searchbar><input id=q placeholder="输入剧名 / 电影名 / 动漫名，回车搜索" onkeydown="if(event.key=='Enter')doSearch()"><button onclick=doSearch()>搜索</button></div>
 <div id=sresult></div></div>
+</div>
+<div id=tab-media class=tab>
+<div class=card><h2>📥 整理入库 <span class=mut style=font-weight:400>· 下载完成自动识别→硬链接进 Emby 媒体库 · 待确认的可手动填 TMDB id/片名</span></h2><table><tr><th>下载名</th><th>分类</th><th>识别为</th><th>状态</th><th>目标/操作</th></tr>{{MEDIA}}</table></div>
+</div>
+<div id=tab-seed class=tab>
 <div class=stats>
 <div class=stat><div class=n>{{TOTAL}}</div><div class=l>已处理种子</div></div>
 <div class=stat><div class=n style=color:var(--ok)>{{INJECT}}</div><div class=l>累计辅种注入</div></div>
 <div class=stat><div class=n>{{DONE}}</div><div class=l>有匹配的种子</div></div>
 <div class=stat><div class=n class=mut>{{NOMATCH}}</div><div class=l>无匹配</div></div>
 </div>
-<div class=card><h2>📥 整理入库 <span class=mut style=font-weight:400>· 下载完成自动识别→硬链接进 Emby 媒体库 · 待确认的可手动填 TMDB id/片名</span></h2><table><tr><th>下载名</th><th>分类</th><th>识别为</th><th>状态</th><th>目标/操作</th></tr>{{MEDIA}}</table></div>
-<div class=card><h2>种子辅种记录 <span class=mut style=font-weight:400>· 点种子名看来源站和辅种去向</span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>匹配</th><th class=r>注入</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
+<div class=card><h2>辅种记录 <span class=mut style=font-weight:400>· 每 {{INTERVAL}}s 扫描 · 点种子名看来源和去向 · 辅不上可手动关键词重搜</span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>匹配</th><th class=r>注入</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
+</div>
+<div id=tab-logs class=tab>
 <div class=card><h2>最近活动</h2><table><tr><th style=width:150px>时间</th><th>消息</th></tr>{{LOGS}}</table></div>
-<div class=sub style=text-align:center>PackSeed · 自制辅种 · 替代 cross-seed</div>
+</div>
+<div class=sub style=text-align:center>PackSeed · 一个人的 PT 全家桶 · MIT 开源</div>
 </div><div id=toast></div>
 <script>
+function showTab(t){
+ document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
+ document.querySelectorAll('.tabbtn').forEach(e=>e.classList.remove('on'));
+ var el=document.getElementById('tab-'+t);(el||document.getElementById('tab-search')).classList.add('active');
+ var b=document.querySelector('.tabbtn[data-t="'+(el?t:'search')+'"]');if(b)b.classList.add('on');
+}
+showTab((location.hash||'#search').slice(1));
+window.addEventListener('hashchange',function(){showTab(location.hash.slice(1)||'search');});
 var _t=setTimeout(()=>location.reload(),15000);
 function research(h,el){
  var inp=el.parentNode.querySelector('input');var q=inp.value.trim();
@@ -782,26 +814,47 @@ function research(h,el){
   .catch(e=>{toast('触发失败');el.disabled=false;el.textContent='重搜';});
 }
 function toast(m){var t=document.getElementById('toast');t.textContent=m;t.className='show';setTimeout(()=>t.className='',3000);}
+function mkTable(rs){
+ var tbl=document.createElement('table');
+ var hd=document.createElement('tr');hd.innerHTML='<th>标题</th><th>站点</th><th class=r>大小</th><th class=r>做种</th><th></th>';tbl.appendChild(hd);
+ rs.forEach(function(x){
+  var tr=document.createElement('tr');
+  var c1=document.createElement('td');c1.className='sname';c1.title=x.title;c1.textContent=x.title;
+  var c2=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=x.site;c2.appendChild(sp);
+  var c3=document.createElement('td');c3.className='r';c3.textContent=x.sizeh;
+  var c4=document.createElement('td');c4.className='r';c4.textContent=x.seeders;
+  var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x.url);};c5.appendChild(b);
+  tr.appendChild(c1);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tr.appendChild(c5);tbl.appendChild(tr);
+ });
+ return tbl;
+}
 function doSearch(){
  var q=document.getElementById('q').value.trim();if(!q)return;
  clearTimeout(_t);
  var box=document.getElementById('sresult');
- box.innerHTML='<div class=mut style="padding:10px 16px">搜索中…（全站搜索约 30~60 秒，稍候）</div>';
+ box.innerHTML='<div class=mut style="padding:10px 16px">搜索中…（全站搜索+识别配图约 40~70 秒，稍候）</div>';
  fetch('/api/search?q='+encodeURIComponent(q)).then(r=>r.json()).then(function(d){
   if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">搜索失败：'+(d.err||'')+'</div>';return;}
-  if(!d.results.length){box.innerHTML='<div class=mut style="padding:10px 16px">没搜到结果，换个关键词试试</div>';return;}
-  var tbl=document.createElement('table');
-  var hd=document.createElement('tr');hd.innerHTML='<th>标题</th><th>站点</th><th class=r>大小</th><th class=r>做种</th><th></th>';tbl.appendChild(hd);
-  d.results.forEach(function(x){
-   var tr=document.createElement('tr');
-   var c1=document.createElement('td');c1.className='sname';c1.title=x.title;c1.textContent=x.title;
-   var c2=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=x.site;c2.appendChild(sp);
-   var c3=document.createElement('td');c3.className='r';c3.textContent=x.sizeh;
-   var c4=document.createElement('td');c4.className='r';c4.textContent=x.seeders;
-   var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x.url);};c5.appendChild(b);
-   tr.appendChild(c1);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tr.appendChild(c5);tbl.appendChild(tr);
+  var gs=d.groups||[],ot=d.other||[];
+  if(!gs.length&&!ot.length){box.innerHTML='<div class=mut style="padding:10px 16px">没搜到结果，换个关键词试试</div>';return;}
+  box.innerHTML='';
+  gs.forEach(function(g){
+   var sec=document.createElement('div');sec.className='grpsec';
+   var hd=document.createElement('div');hd.className='grp';
+   if(g.poster){var im=document.createElement('img');im.className='pos';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(g.poster);hd.appendChild(im);}
+   var inf=document.createElement('div');
+   var t=document.createElement('div');t.className='gt';t.textContent=g.name+(g.year?' ('+g.year+')':'')+' ';
+   var b=document.createElement('span');b.className='src';b.textContent=(g.mtype=='tv'?'剧集':'电影')+' · '+g.results.length+'个种';t.appendChild(b);
+   var ov=document.createElement('div');ov.className='mut gov';ov.textContent=g.overview||'';
+   inf.appendChild(t);inf.appendChild(ov);hd.appendChild(inf);
+   sec.appendChild(hd);sec.appendChild(mkTable(g.results));
+   box.appendChild(sec);
   });
-  box.innerHTML='';box.appendChild(tbl);
+  if(ot.length){
+   var sec=document.createElement('div');sec.className='grpsec';
+   var oh=document.createElement('div');oh.className='gt';oh.style.padding='12px 16px 0';oh.textContent='🧩 未识别 / 其他 ('+ot.length+')';
+   sec.appendChild(oh);sec.appendChild(mkTable(ot));box.appendChild(sec);
+  }
  }).catch(e=>{box.innerHTML='<div class=mut style="padding:10px 16px">搜索出错</div>';});
 }
 function dl(b,u){
@@ -883,6 +936,8 @@ class Handler(BaseHTTPRequestHandler):
             s._dl(); return
         if s.path.startswith("/api/reid"):
             s._reid(); return
+        if s.path.startswith("/api/poster"):
+            s._poster(); return
         if s.path.startswith("/api"):
             s._json(); return
         c = db()
@@ -988,7 +1043,55 @@ class Handler(BaseHTTPRequestHandler):
             out.append({"title": r.get("title",""), "site": r.get("indexer",""),
                         "sizeh": human_size(r.get("size",0)), "seeders": r.get("seeders") or 0, "url": url})
         out.sort(key=lambda x: x["seeders"], reverse=True)
-        s._send_json({"ok":True,"results":out[:80]})
+        out = out[:100]
+        # 识别分组(MP式)：按提取词归并，最多对8个不同内容做 TMDB 识别，配海报好分辨
+        keys = {}
+        for x in out:
+            k = extract_query(x["title"]).lower()
+            x["k"] = k
+            info = keys.setdefault(k, {"rep": x["title"], "n": 0})
+            info["n"] += 1
+        matched = {}
+        for k, info in sorted(keys.items(), key=lambda kv: -kv[1]["n"])[:12]:
+            if not k: continue
+            try: m = tmdb_match(info["rep"])
+            except Exception: m = None
+            if m: matched[k] = m
+        groups = {}; other = []
+        for x in out:
+            m = matched.get(x.pop("k"))
+            if m:
+                gk = (m["mtype"], m["id"])
+                g = groups.setdefault(gk, {"name": m["tmdb_name"], "year": m["year"], "mtype": m["mtype"],
+                                           "poster": m.get("poster",""), "overview": (m.get("overview") or "")[:110],
+                                           "results": []})
+                g["results"].append(x)
+            else:
+                other.append(x)
+        glist = sorted(groups.values(), key=lambda g: -len(g["results"]))
+        s._send_json({"ok": True, "groups": glist, "other": other})
+    def _poster(s):
+        # 海报代理：TMDB 图片国内不通，走 TMDB_PROXY 抓取并缓存在 /config/posters
+        from urllib.parse import urlparse, parse_qs
+        p = (parse_qs(urlparse(s.path).query).get("p",[""])[0]).strip()
+        if not re.match(r'^/[A-Za-z0-9._-]+\.(jpg|jpeg|png)$', p):
+            s.send_response(404); s.end_headers(); return
+        cache = os.path.join(os.path.dirname(CFG["DB"]), "posters", p.lstrip("/"))
+        data = None
+        if os.path.exists(cache):
+            data = open(cache, "rb").read()
+        else:
+            try:
+                op = urllib.request.build_opener(urllib.request.ProxyHandler(
+                    {"http":CFG["TMDB_PROXY"],"https":CFG["TMDB_PROXY"]})) if CFG["TMDB_PROXY"] else urllib.request.build_opener()
+                data = op.open("https://image.tmdb.org/t/p/w185" + p, timeout=20).read()
+                os.makedirs(os.path.dirname(cache), exist_ok=True)
+                open(cache, "wb").write(data)
+            except Exception:
+                s.send_response(404); s.end_headers(); return
+        s.send_response(200); s.send_header("Content-Type","image/jpeg")
+        s.send_header("Cache-Control","max-age=604800"); s.send_header("Content-Length",str(len(data)))
+        s.end_headers(); s.wfile.write(data)
     def _dl(s):
         from urllib.parse import urlparse, parse_qs
         u = (parse_qs(urlparse(s.path).query).get("url",[""])[0]).strip()
