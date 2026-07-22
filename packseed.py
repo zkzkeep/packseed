@@ -434,17 +434,25 @@ def walk_files(path):
 def _safe(s): return re.sub(r'[\\/:*?"<>|]+',' ',(s or "")).strip()
 
 def organize_files(files, m, cat):
-    """files: [(绝对源路径, 相对路径)]；按类型硬链接进媒体库。返回(目标目录, 链接数)"""
+    """files: [(绝对源路径, 相对路径)]；按类型硬链接进媒体库。返回(目标目录, 链接数)
+    普通剧/影：只链视频+字幕，拍平到目标目录(Emby 认文件名里的 SxxExx)。
+    蓝光/DVD原盘(BDMV/VIDEO_TS)：完整保留目录结构、不过滤文件，Emby 才能当原盘碟识别。"""
     folder = f"{_safe(m['tmdb_name'])} ({m['year']})" if m.get("year") else _safe(m['tmdb_name'])
     if cat == "动漫" and CFG["MEDIA_ANIME"]: root = CFG["MEDIA_ANIME"]
     elif m and m["mtype"] == "movie": root = CFG["MEDIA_MOVIE"]
     else: root = CFG["MEDIA_TV"]
     dest_dir = os.path.join(root, folder)
+    disc = any(re.search(r'(^|/)(BDMV|VIDEO_TS|CERTIFICATE)(/|$)', rel) for _, rel in files)
     n = 0
     for src, rel in files:
-        if os.path.splitext(rel)[1].lower() not in _VIDEO_EXT and not rel.lower().endswith((".srt",".ass",".sub")):
-            continue
-        dst = os.path.join(dest_dir, os.path.basename(rel))
+        if disc:
+            # 去掉种子根目录这一层：电影文件夹直接包含 BDMV/，Emby 标准原盘结构
+            sub = rel.split("/", 1)[1] if "/" in rel else rel
+            dst = os.path.join(dest_dir, sub)
+        else:
+            if os.path.splitext(rel)[1].lower() not in _VIDEO_EXT and not rel.lower().endswith((".srt",".ass",".sub")):
+                continue
+            dst = os.path.join(dest_dir, os.path.basename(rel))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         if os.path.exists(dst): n += 1; continue
         try:
