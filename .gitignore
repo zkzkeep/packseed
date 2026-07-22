@@ -1,0 +1,9 @@
+*.db
+*.db-journal
+*.db-wal
+__pycache__/
+*.pyc
+.DS_Store
+docker-compose.yml
+config/
+packseed/

@@ -1,0 +1,27 @@
+# PackSeed 示例 compose —— 复制成 docker-compose.yml 并按需修改
+services:
+  packseed:
+    # 方式一：直接用官方 python 镜像 + 挂载脚本
+    image: python:3.11-slim
+    command: python /config/packseed.py
+    # 方式二：用本仓库 Dockerfile 自行构建（把上面两行注释掉，取消下一行注释）
+    # build: .
+    container_name: packseed
+    ports:
+      - "2470:2470"
+    volumes:
+      - ./packseed:/config              # 放 packseed.py 和数据库
+      - /path/to/your/data:/data        # 与下载器共享的数据目录（硬链接需同一文件系统）
+    environment:
+      - TZ=Asia/Shanghai
+      - TR_URL=http://transmission:9091
+      - TR_USER=admin
+      - TR_PASS=CHANGE_ME_tr_password
+      - PROWLARR_URL=http://prowlarr:9696
+      - PROWLARR_KEY=CHANGE_ME_prowlarr_apikey
+      - DATA_LINK_DIR=/data/cross-seed-links
+      - SCAN_INTERVAL=1800
+      # 登录（都设置才启用；留空则免登录）
+      - PACKSEED_USER=admin
+      - PACKSEED_PASS=CHANGE_ME_web_password
+    restart: unless-stopped
