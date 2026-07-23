@@ -1300,7 +1300,8 @@ def process_completed(qb, t):
     if "keepseed" in (t.get("tags") or ""):
         # 批量保种的种子:不刮削不入库,直接转 tr 做种;之后辅种扫描自然会带上它
         if transfer_to_tr(qb, ih, name, sp):
-            c = db(); c.execute("UPDATE keepseed SET status='done' WHERE name=? AND status='pushed'", (name,)); c.commit(); c.close()
+            base = name.rsplit(".", 1)[0] if "." in name[-6:] else name   # 站点标题没有扩展名(xx.zip→xx)
+            c = db(); c.execute("UPDATE keepseed SET status='done' WHERE status='pushed' AND name IN (?,?)", (name, base)); c.commit(); c.close()
             logmsg("INFO", f"保种完成→tr: {name[:44]}")
         return
     try:
