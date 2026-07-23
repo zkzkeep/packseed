@@ -653,6 +653,17 @@ def do_organize(ih, name, files, m, cat):
               (ih, name, cat, m["mtype"], m["id"], m["tmdb_name"], m["year"], "", m["conf"], "processing", len(files), int(time.time())))
     c.commit(); c.close()
     dest, n = organize_files(files, m, cat)
+    # 兜底本地海报: TMDB 有图就落 poster.jpg,Emby 优先读本地,刮削抽风也不怕
+    try:
+        if m.get("poster") and not os.path.exists(os.path.join(dest, "poster.jpg")):
+            op = urllib.request.build_opener(urllib.request.ProxyHandler(
+                {"http": CFG["TMDB_PROXY"], "https": CFG["TMDB_PROXY"]})) if CFG["TMDB_PROXY"] else urllib.request.build_opener()
+            img = op.open("https://image.tmdb.org/t/p/w780" + m["poster"], timeout=25).read()
+            if len(img) > 5000:
+                pp = os.path.join(dest, "poster.jpg"); open(pp, "wb").write(img)
+                try: os.chown(pp, int(os.environ.get("PUID","1000")), int(os.environ.get("PGID","1001")))
+                except Exception: pass
+    except Exception: pass
     c = db(); c.execute("UPDATE media SET target=?, files=?, status='done' WHERE info_hash=?", (dest, n, ih)); c.commit(); c.close()
     logmsg("INFO", f"入库 {m['tmdb_name']} ({m['year']}) ← {name[:36]} | {n}个文件 → {dest}")
     emby_refresh()
