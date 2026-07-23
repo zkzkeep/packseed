@@ -1697,6 +1697,7 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 .shint{grid-column:2;font-size:11px;color:var(--sub);margin-top:-4px}
 .ksin{background:rgba(255,255,255,.14);border:none;color:#fff;border-radius:10px;padding:9px 13px;font-size:13px;outline:none}
 .ksin:focus{box-shadow:0 0 0 2.5px rgba(255,255,255,.5)}
+.ksin::placeholder,.srow input::placeholder{color:rgba(255,255,255,.72)}
 select.ksin option{color:#00206e}
 .chip{display:inline-block;background:rgba(255,255,255,.16);border-radius:980px;padding:2px 10px;font-size:11px;margin:2px 3px 2px 0}
 .chip.on{background:rgba(80,220,140,.25);color:#b8ffd6}
