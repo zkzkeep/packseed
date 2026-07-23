@@ -1003,12 +1003,33 @@ function doSearch(){
  var q=document.getElementById('q').value.trim();if(!q)return;
  clearTimeout(_t);
  var box=document.getElementById('sresult');
- box.innerHTML='<div class=mut style="padding:10px 16px">搜索中…（全站搜索+识别配图约 40~70 秒；搜完点类型即时切换）</div>';
- fetch('/api/search?q='+encodeURIComponent(q)).then(r=>r.json()).then(function(d){
+ box.innerHTML='<div class=mut style="padding:10px 16px">正在提交搜索任务…</div>';
+ fetch('/api/search2?q='+encodeURIComponent(q)).then(r=>r.json()).then(function(d){
+  if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">提交失败：'+(d.err||'')+'</div>';return;}
+  pollJob(d.id,box,Date.now());
+ }).catch(e=>{box.innerHTML='<div class=mut style="padding:10px 16px">提交出错</div>';});
+}
+function pollJob(id,box,t0){
+ fetch('/api/searchstat?id='+id).then(r=>r.json()).then(function(j){
+  if(!j.ok){box.innerHTML='<div class=mut style="padding:10px 16px">'+(j.err||'任务丢失')+'</div>';return;}
+  if(!j.done){
+   var el=Math.round((Date.now()-t0)/1000);
+   var wrap=document.createElement('div');wrap.style.cssText='padding:10px 16px;font-size:13px;line-height:1.8';
+   var tm=document.createElement('div');tm.style.cssText='color:var(--acc);font-weight:600;margin-bottom:4px';
+   tm.textContent='⏱ 搜索进行中 · 已用 '+el+' 秒';wrap.appendChild(tm);
+   (j.log||[]).forEach(function(m,i){
+    var ln=document.createElement('div');ln.style.color=(i==j.log.length-1)?'var(--fg)':'var(--sub)';
+    ln.textContent=m;wrap.appendChild(ln);
+   });
+   box.innerHTML='';box.appendChild(wrap);
+   setTimeout(function(){pollJob(id,box,t0);},1500);
+   return;
+  }
+  var d=j.result||{};
   if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">搜索失败：'+(d.err||'')+'</div>';return;}
   if(!(d.groups||[]).length&&!(d.other||[]).length){box.innerHTML='<div class=mut style="padding:10px 16px">没搜到结果，换个关键词试试</div>';return;}
   _sd=d;renderWall();
- }).catch(e=>{box.innerHTML='<div class=mut style="padding:10px 16px">搜索出错</div>';});
+ }).catch(function(){setTimeout(function(){pollJob(id,box,t0);},2500);});
 }
 function dl(b,u){
  b.disabled=true;b.textContent='下载中…';
@@ -1069,6 +1090,80 @@ def _dlmeta(h, name):
         _DLMETA[h] = m
     return m
 
+
+def search_group(q, results, log=lambda m: None):
+    """Prowlarr 结果 → 做种过滤 + TMDB 识别分组。log 回调用于搜索过程直播。"""
+    def catlab(r):
+        ids = [c.get("id", 0) for c in (r.get("categories") or [])]
+        if any(i == 5070 for i in ids): return "anime"
+        if any(2000 <= i < 3000 for i in ids): return "movie"
+        if any(5000 <= i < 6000 for i in ids): return "tv"
+        if any(3000 <= i < 4000 for i in ids): return "music"
+        if any(7000 <= i < 8000 for i in ids): return "book"
+        return ""
+    out = []
+    for r in results:
+        url = r.get("downloadUrl") or r.get("guid") or ""
+        if not url: continue
+        out.append({"title": r.get("title",""), "site": r.get("indexer",""),
+                    "sizeh": human_size(r.get("size",0)), "seeders": r.get("seeders") or 0,
+                    "url": url, "cat": catlab(r), "info": r.get("infoUrl") or ""})
+    out.sort(key=lambda x: x["seeders"], reverse=True)
+    out = out[:100]
+    keys = {}
+    for x in out:
+        k = extract_query(x["title"]).lower()
+        x["k"] = k
+        info = keys.setdefault(k, {"rep": x["title"], "n": 0})
+        info["n"] += 1
+    matched = {}
+    todo = [(k, i) for k, i in sorted(keys.items(), key=lambda kv: -kv[1]["n"])[:12] if k]
+    for idx, (k, info) in enumerate(todo):
+        try: m = tmdb_match(info["rep"])
+        except Exception: m = None
+        if m and m["conf"] != "low":
+            matched[k] = m
+            log(f"🔎 识别 {idx+1}/{len(todo)}: {info['rep'][:36]} → {m['tmdb_name']} ({m['year']})")
+        else:
+            log(f"🧩 识别 {idx+1}/{len(todo)}: {info['rep'][:36]} → 未识别,归入其他")
+    groups = {}; other = []
+    for x in out:
+        m = matched.get(x.pop("k"))
+        if m:
+            gk = (m["mtype"], m["id"])
+            g = groups.setdefault(gk, {"name": m["tmdb_name"], "year": m["year"], "mtype": m["mtype"],
+                                       "cat": "anime" if m.get("anime") else m["mtype"],
+                                       "poster": m.get("poster",""), "overview": (m.get("overview") or "")[:110],
+                                       "results": []})
+            g["results"].append(x)
+        else:
+            other.append(x)
+    def seed_filter(rs):
+        good = [x for x in rs if x["seeders"] >= CFG["MIN_SEEDERS"]]
+        if good: return good
+        return rs[:max(1, round(len(rs) * 0.2))]
+    for g in groups.values():
+        g["results"] = seed_filter(g["results"])
+    if other: other = seed_filter(other)
+    glist = sorted(groups.values(), key=lambda g: -(g["results"][0]["seeders"] if g["results"] else 0))
+    return {"ok": True, "groups": glist, "other": other}
+
+_SJOBS = {}
+def _sjob_run(jid, q):
+    job = _SJOBS[jid]
+    def log(m): job["log"].append(m)
+    try:
+        log(f"🚀 已提交「{q}」→ Prowlarr 全站并发查询(约 30~60 秒,站点越慢的越拖后腿)…")
+        t0 = time.time()
+        results = prowlarr_search(q)
+        log(f"📦 站点返回 {len(results)} 条,耗时 {int(time.time()-t0)} 秒。做种数过滤 + TMDB 识别配图…")
+        job["result"] = search_group(q, results, log)
+        log("✅ 完成")
+    except Exception as e:
+        job["result"] = {"ok": False, "err": str(e)[:80]}
+        log(f"❌ 失败: {str(e)[:60]}")
+    job["done"] = True
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(s, *a): pass
     def _auth_ok(s):
@@ -1097,6 +1192,10 @@ class Handler(BaseHTTPRequestHandler):
             s._research(); return
         if s.path.startswith("/torrent"):
             s._detail(); return
+        if s.path.startswith("/api/search2"):
+            s._search2(); return
+        if s.path.startswith("/api/searchstat"):
+            s._searchstat(); return
         if s.path.startswith("/api/search"):
             s._search(); return
         if s.path.startswith("/api/dl"):
@@ -1209,59 +1308,23 @@ class Handler(BaseHTTPRequestHandler):
             results = prowlarr_search(q, cats)
         except Exception as e:
             logmsg("WARN", f"搜索下载查询失败[{q}]: {e}"); s._send_json({"ok":False,"err":str(e)[:80]}); return
-        def catlab(r):
-            ids = [c.get("id", 0) for c in (r.get("categories") or [])]
-            if any(i == 5070 for i in ids): return "anime"
-            if any(2000 <= i < 3000 for i in ids): return "movie"
-            if any(5000 <= i < 6000 for i in ids): return "tv"
-            if any(3000 <= i < 4000 for i in ids): return "music"
-            if any(7000 <= i < 8000 for i in ids): return "book"
-            return ""
-        out = []
-        for r in results:
-            url = r.get("downloadUrl") or r.get("guid") or ""
-            if not url: continue
-            out.append({"title": r.get("title",""), "site": r.get("indexer",""),
-                        "sizeh": human_size(r.get("size",0)), "seeders": r.get("seeders") or 0,
-                        "url": url, "cat": catlab(r), "info": r.get("infoUrl") or ""})
-        out.sort(key=lambda x: x["seeders"], reverse=True)
-        out = out[:100]
-        # 识别分组(MP式)：按提取词归并，最多对8个不同内容做 TMDB 识别，配海报好分辨
-        keys = {}
-        for x in out:
-            k = extract_query(x["title"]).lower()
-            x["k"] = k
-            info = keys.setdefault(k, {"rep": x["title"], "n": 0})
-            info["n"] += 1
-        matched = {}
-        for k, info in sorted(keys.items(), key=lambda kv: -kv[1]["n"])[:12]:
-            if not k: continue
-            try: m = tmdb_match(info["rep"])
-            except Exception: m = None
-            if m and m["conf"] != "low": matched[k] = m   # 低置信别乱建分组,进"未识别"兜底
-        groups = {}; other = []
-        for x in out:
-            m = matched.get(x.pop("k"))
-            if m:
-                gk = (m["mtype"], m["id"])
-                g = groups.setdefault(gk, {"name": m["tmdb_name"], "year": m["year"], "mtype": m["mtype"],
-                                           "cat": "anime" if m.get("anime") else m["mtype"],
-                                           "poster": m.get("poster",""), "overview": (m.get("overview") or "")[:110],
-                                           "results": []})
-                g["results"].append(x)
-            else:
-                other.append(x)
-        # 做种数过滤：低保种的下不动没意义；某内容整体都低则保留其前20%(冷门留余地)
-        def seed_filter(rs):
-            good = [x for x in rs if x["seeders"] >= CFG["MIN_SEEDERS"]]
-            if good: return good
-            return rs[:max(1, round(len(rs) * 0.2))]   # rs 已按做种数降序
-        for g in groups.values():
-            g["results"] = seed_filter(g["results"])
-        if other: other = seed_filter(other)
-        # 海报墙按最高做种数排(结果本身已按做种降序,首个即最高)
-        glist = sorted(groups.values(), key=lambda g: -(g["results"][0]["seeders"] if g["results"] else 0))
-        s._send_json({"ok": True, "groups": glist, "other": other})
+        s._send_json(search_group(q, results))
+    def _search2(s):
+        from urllib.parse import urlparse, parse_qs
+        q = (parse_qs(urlparse(s.path).query).get("q",[""])[0]).strip()
+        if not q: s._send_json({"ok":False,"err":"关键词为空"}); return
+        jid = str(int(time.time()*1000))
+        _SJOBS[jid] = {"log": [], "done": False, "result": None, "ts": time.time()}
+        threading.Thread(target=_sjob_run, args=(jid, q), daemon=True).start()
+        for k in [k for k, v in list(_SJOBS.items()) if time.time()-v["ts"] > 600 and k != jid]:
+            _SJOBS.pop(k, None)
+        s._send_json({"ok":True,"id":jid})
+    def _searchstat(s):
+        from urllib.parse import urlparse, parse_qs
+        jid = (parse_qs(urlparse(s.path).query).get("id",[""])[0]).strip()
+        j = _SJOBS.get(jid)
+        if not j: s._send_json({"ok":False,"err":"任务不存在或已过期"}); return
+        s._send_json({"ok":True,"log":j["log"],"done":j["done"],"result":(j["result"] if j["done"] else None)})
     def _canceldl(s):
         from urllib.parse import urlparse, parse_qs
         h = (parse_qs(urlparse(s.path).query).get("hash",[""])[0]).strip()
