@@ -29,6 +29,7 @@ CFG = {
     "QB_PASS":      os.environ.get("QB_PASS", ""),
     "QB_CATEGORY":  os.environ.get("QB_CATEGORY", ""),     # 兜底分类，留空则按识别的类型(电影/电视剧/动漫)
     "MIN_SEEDERS":  int(os.environ.get("MIN_SEEDERS", "20")),  # 搜索结果做种数门槛;整体都低时保留前20%
+    "TR_BAN_SITES": os.environ.get("TR_BAN_SITES", "hhanclub,hd dolby,hddolby,tjupt,北洋园"),  # ban了tr客户端的站,不注入
     # —— 整理器（识别+刮削入库）——
     "TMDB_KEY":     os.environ.get("TMDB_KEY", ""),
     "TMDB_PROXY":   os.environ.get("TMDB_PROXY", ""),      # TMDB 走代理(国内需要)，如 http://x:7890
@@ -217,7 +218,7 @@ class TR:
                 raise
         raise RuntimeError("tr rpc fail")
     def torrents(s):
-        r = s.call("torrent-get", {"fields":["hashString","name","totalSize","files","downloadDir","trackers"]})
+        r = s.call("torrent-get", {"fields":["hashString","name","totalSize","files","downloadDir","trackers","percentDone"]})
         return r.get("arguments", {}).get("torrents", [])
     def add(s, torrent_bytes, download_dir):
         return s.call("torrent-add", {"metainfo":base64.b64encode(torrent_bytes).decode(),"download-dir":download_dir,"paused":False})
@@ -861,11 +862,16 @@ def manual_organize(ih, query):
 def _preseed(ih, name, mates):
     """下载时预存的同组候选辅种：不搜索,直接拿已知站点的种子来比对注入"""
     try:
-        time.sleep(25)                      # 给 tr 校验留时间
-        tr = TR()
-        t = next((x for x in tr.torrents() if x["hashString"].lower() == ih.lower()), None)
+        tr = TR(); t = None
+        for _ in range(20):                 # 最多等10分钟: 源必须校验到100%,否则注入的全是残种
+            time.sleep(30)
+            t = next((x for x in tr.torrents() if x["hashString"].lower() == ih.lower()), None)
+            if t and t.get("percentDone", 0) >= 1: break
         if not t:
             logmsg("WARN", f"预存辅种: tr里没找到 {name[:32]}"); return
+        if t.get("percentDone", 0) < 1:
+            logmsg("WARN", f"预存辅种取消: 源校验只有{round(t.get('percentDone',0)*100,1)}%,数据有问题,不注入垃圾 {name[:30]}")
+            return
         cands = [{"downloadUrl": m.get("url",""), "size": m.get("size",0), "indexer": m.get("site","")} for m in mates]
         logmsg("INFO", f"⚡ 预存辅种开跑(下载时已知 {len(cands)} 个站): {name[:36]}")
         run_match(tr, t, [], pre_results=cands)
@@ -923,9 +929,12 @@ def run_match(tr, t, queries, manual=False, pre_results=None):
 
     def process(results):
         m = inj = 0
+        ban = [b.strip().lower() for b in CFG["TR_BAN_SITES"].split(",") if b.strip()]
         for r in results:
             if not r.get("downloadUrl") or abs(r.get("size",0)-total) >= total*CFG["SIZE_TOLERANCE"]:
                 continue
+            if any(b in (r.get("indexer") or "").lower() for b in ban):
+                continue                      # 该站 ban 了 Transmission 客户端,注了也是废种
             time.sleep(CFG["SNATCH_DELAY"])
             try:
                 data = prowlarr_download(r["downloadUrl"])
