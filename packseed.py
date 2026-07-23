@@ -1483,7 +1483,7 @@ def scanner():
 
 # ============ 网页仪表盘 ============
 PAGE = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>观澜 GuanLan</title><link rel="icon" href="/favicon.ico" type="image/svg+xml"><style>
+<title>观澜 Wavegazer</title><link rel="icon" href="/favicon.ico" type="image/svg+xml"><style>
 :root{--ikb:#002FA7;--acc:#ffffff;--accL:#CFE0FF;--pop:#FFD400;--ok:#3ddc84;--warn:#ffd83d;--err:#ff8579;--fg:#fff;--sub:rgba(255,255,255,.68);--line:rgba(255,255,255,.24);--card:rgba(255,255,255,.17);--card2:rgba(255,255,255,.26)}
 *{box-sizing:border-box}::selection{background:rgba(255,255,255,.3)}
 body{margin:0;color:#fff;font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased;
@@ -1589,7 +1589,7 @@ animation:seadrift 46s ease-in-out infinite alternate;z-index:0}
 .rname{font-size:12px;font-weight:600;margin-top:7px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ryear{font-size:11px;color:var(--sub);margin-top:1px}
 </style></head><body><div class=wrap>
-<h1>🌊 观澜</h1><div class=sub>观影观澜 · 搜索 / 下载 / 刮削 / 保种 / 辅种 —— 一个人的影音港湾</div>
+<h1 style="display:flex;align-items:center;gap:11px"><svg width="34" height="34" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="14" fill="#0a2fb5" stroke="rgba(255,255,255,.35)"/><circle cx="46" cy="17" r="7.5" fill="#FFD400"/><path d="M2 37c7-9 15-9 21 0s15 9 21 0 12-8 18-3v30H2z" fill="#ffffff" opacity="0.95"/><path d="M2 47c7-7 13-7 19 0s15 7 21 0 14-7 20-1v18H2z" fill="#CFE0FF" opacity="0.9"/></svg>观澜 <span style="font-size:15px;font-weight:600;color:rgba(255,255,255,.6);letter-spacing:.04em">Wavegazer</span></h1><div class=sub>观影观澜 · 搜索 / 下载 / 刮削 / 保种 / 辅种 —— 一个人的影音港湾</div>
 <div class=tabs>
 <a href="#search" class="tabbtn" data-t="search">🔍 搜索下载</a>
 <a href="#dl" class="tabbtn" data-t="dl">⬇️ 下载管理</a>
@@ -1638,7 +1638,7 @@ animation:seadrift 46s ease-in-out infinite alternate;z-index:0}
 <div id=tab-logs class=tab>
 <div class=card><h2>最近活动</h2><table><tr><th style=width:150px>时间</th><th>消息</th></tr>{{LOGS}}</table></div>
 </div>
-<div class=sub style=text-align:center>观澜 GuanLan · 一个人的影音港湾 · MIT 开源</div>
+<div class=sub style=text-align:center>观澜 Wavegazer · 一个人的影音港湾 · MIT 开源</div>
 </div><div id=toast></div>
 <script>
 var _dlT=null;
@@ -1925,7 +1925,7 @@ td{text-align:left;padding:9px 6px;border-top:1px solid var(--line);font-size:13
 </div></div>
 <div class=card><h2>辅种去向 · 这份数据同时在这些站做种</h2>
 <table><tr><th>站点</th><th>方式</th><th>结果</th></tr>{{MROWS}}</table></div>
-<div class=mut style=text-align:center;font-size:12px>观澜 GuanLan</div>
+<div class=mut style=text-align:center;font-size:12px>观澜 Wavegazer</div>
 </div></body></html>"""
 
 _DASH_MEDIA = {}
