@@ -1559,11 +1559,11 @@ a{color:var(--accL);text-decoration:none}
 .dtt{font-size:14px;font-weight:600;letter-spacing:-.01em}.dtt .mut{font-weight:400;font-size:12px}
 .hero{position:relative;border-radius:22px;overflow:hidden;text-align:center;padding:64px 20px 46px;margin-bottom:20px;
 background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba(255,255,255,.18)}
-.hero::before{content:'';position:absolute;inset:-7%;background:url('/api/bg') center 42%/cover no-repeat;
-animation:seadrift 46s ease-in-out infinite alternate;z-index:0}
+.hero::before{content:'';position:absolute;inset:-10%;background:url('/api/bg') center 42%/cover no-repeat;
+animation:seadrift 14s ease-in-out infinite alternate;z-index:0}
 .hero::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,25,95,.30) 0%,rgba(0,47,167,.55) 62%,rgba(0,47,167,.92) 100%);z-index:1}
 .hero>*{position:relative;z-index:2}
-@keyframes seadrift{from{transform:scale(1.05) translate(-1.6%,-1%)}to{transform:scale(1.14) translate(1.6%,1.6%)}}
+@keyframes seadrift{0%{transform:scale(1.06) translate(-3%,-1.5%)}50%{transform:scale(1.16) translate(0.5%,1.2%)}100%{transform:scale(1.08) translate(3%,-0.8%)}}
 .herotitle{font-size:30px;font-weight:800;letter-spacing:-.02em;margin-bottom:22px;text-shadow:0 3px 18px rgba(0,10,60,.55)}
 .herotitle .mut{font-weight:500;font-size:14px;color:rgba(255,255,255,.82)}
 .hero .searchbar{max-width:780px;margin:0 auto;padding:0}
