@@ -1124,7 +1124,8 @@ def emby_pin(dest, tid, name, mtype):
         dto["ProviderIds"] = {"Tmdb": str(tid)}
         dto["LockedFields"] = ["Name"]
         _p(f"/Items/{it['Id']}", dto)
-        _p(f"/Items/{it['Id']}/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default&ReplaceAllMetadata=true&ReplaceAllImages=false", {})
+        # 千万不能 ReplaceAllMetadata=true——那会清掉刚写的身份重新瞎识别(血泪教训)
+        _p(f"/Items/{it['Id']}/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default&ReplaceAllMetadata=false&ReplaceAllImages=false", {})
         logmsg("INFO", f"📌 Emby 身份已钉死: {name} (tmdb {tid})")
     except Exception as e:
         logmsg("WARN", f"Emby钉身份失败 {name[:20]}: {str(e)[:40]}")
