@@ -117,6 +117,8 @@ services:
 | `MEDIA_ANIME` | 空 | 动漫库根目录，留空则动漫也归到 tv 库 |
 | `EMBY_URL` / `EMBY_KEY` | 空 | Emby 地址和 API Key，入库后通知刷新（可选）|
 | `TR_SEED_DIR` | 空 | 转种到 tr 的数据目录，留空=用 qb 的保存目录 |
+| `KEEP_DIR` | `/data/downloads/keepseed` | 批量保种专用目录（容器内路径）：保种种子全部隔离在此，**不辅种/不入库**，到期删目录即清仓 |
+| `KEEP_MIN_FREE_GB` | `200` | 批量保种磁盘保护线：剩余空间低于此值任务自动暂停 |
 
 ## 前置条件
 

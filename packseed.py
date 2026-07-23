@@ -53,6 +53,7 @@ CFG = {
     "ORGANIZE":     os.environ.get("ORGANIZE", "1") == "1",  # 下载完成自动整理入库+转种
     "TR_SEED_DIR":  os.environ.get("TR_SEED_DIR", ""),    # 转种到 tr 时的数据目录(容器内)，留空=用 qb 的保存目录
     "KEEP_MIN_FREE_GB": int(os.environ.get("KEEP_MIN_FREE_GB", "200")),  # 批量保种磁盘保护线:剩余低于此值自动暂停
+    "KEEP_DIR": os.environ.get("KEEP_DIR", "/data/downloads/keepseed"),  # 保种专用目录:与正常下载隔离,不辅种不入库,到期整锅清
 }
 
 # ============ 设置中心: /config/settings.json 覆盖环境变量,网页可改,热生效 ============
@@ -133,12 +134,15 @@ SETTING_GROUPS = [
         ("WECOM_AESKEY", "回调 EncodingAESKey", "43位", True),
         ("WECOM_PROXY", "企微 API 代理", "可信IP方案用,留空直连", False),
     ]),
+    ("🌊 批量保种(选用)", [
+        ("KEEP_DIR", "保种专用目录", "容器内路径。批量保种的种子全部隔离在此:不辅种/不入库/不打扰正常下载,到期删此目录+tr按目录删种即整体清仓", False),
+        ("KEEP_MIN_FREE_GB", "磁盘保护线(GB)", "剩余空间低于此值,保种任务自动暂停,防止塞爆盘", False),
+    ]),
     ("⚙️ 其他", [
         ("PUBLIC_URL", "本面板公网地址", "图文通知海报要用,如 https://seed.example.com", False),
         ("MIN_SEEDERS", "搜索结果做种数门槛", "", False),
         ("SCAN_INTERVAL", "辅种扫描间隔(秒)", "", False),
         ("TR_BAN_SITES", "tr被ban站点黑名单", "逗号分隔,命中站点不注入", False),
-        ("KEEP_MIN_FREE_GB", "批量保种磁盘保护线(GB)", "剩余空间低于此值,保种任务自动暂停,防止塞爆", False),
     ]),
 ]
 SETTABLE = {k for _, fs in SETTING_GROUPS for k, _, _, _ in fs}
@@ -713,7 +717,7 @@ class QB:
     def _get(s, path):
         req = urllib.request.Request(s.url+path, headers=s._headers())
         return urllib.request.urlopen(req, timeout=30).read()
-    def add(s, data, category="", tags=""):
+    def add(s, data, category="", tags="", savepath=""):
         b = "----packseed" + str(int(time.time()*1000)); parts = []
         def field(name, val):
             parts.append(("--"+b+"\r\nContent-Disposition: form-data; name=\""+name+"\"\r\n\r\n"+val+"\r\n").encode())
@@ -721,6 +725,7 @@ class QB:
                       "Content-Type: application/x-bittorrent\r\n\r\n").encode()); parts.append(data); parts.append(b"\r\n")
         if category: field("category", category)
         if tags: field("tags", tags)
+        if savepath: field("savepath", savepath); field("autoTMM", "false")   # 指定目录时禁自动管理,防被分类路径顶掉
         parts.append(("--"+b+"--\r\n").encode())
         req = urllib.request.Request(s.url+"/api/v2/torrents/add", data=b"".join(parts),
               headers=s._headers({"Content-Type":"multipart/form-data; boundary="+b}))
@@ -1571,7 +1576,9 @@ def scanner():
             for t in torrents:
                 key = (t.get("name",""), t.get("totalSize",0))
                 if key in seen_content: continue                        # 该内容已处理/冷却中/本轮已排入
-                if t.get("totalSize",0) <= 0 or "cross-seed-links" in t.get("downloadDir",""): continue
+                dd = t.get("downloadDir","")
+                if t.get("totalSize",0) <= 0 or "cross-seed-links" in dd: continue
+                if CFG["KEEP_DIR"] and dd.startswith(CFG["KEEP_DIR"].rstrip("/")): continue   # 保种专用目录:只做种,不辅种
                 seen_content.add(key); todo.append(t)
             logmsg("INFO", f"扫描: tr共{len(torrents)}个副本, 去重后待辅种{len(todo)}个内容")
             for t in todo:
@@ -1759,7 +1766,7 @@ select.ksin option{color:#00206e}
 <div class=card><h2>辅种记录 <span class=mut style=font-weight:400>· 每 {{INTERVAL}}s 扫描 · 点种子名看来源和去向 · 辅不上可手动关键词重搜</span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>在辅站数</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
 </div>
 <div id=tab-keep class=tab>
-<div class=card><h2>🌊 批量保种 <span class=mut style=font-weight:400>· 选站拉列表 → 筛选勾选 → 批量推 qb,下载完自动转 tr 做种 · 节流拉取,磁盘低于保护线自动暂停</span></h2>
+<div class=card><h2>🌊 批量保种 <span class=mut style=font-weight:400>· 选站拉列表 → 筛选勾选 → 批量推 qb,下载完自动转 tr 做种 · 隔离在保种专用目录:不辅种/不入库/不打扰正常流水线,到期删目录即清仓 · 磁盘低于保护线自动暂停</span></h2>
 <div style="padding:4px 20px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
 <select id=ks-ix class=ksin style="min-width:160px"><option value="">加载站点中…</option></select>
 <input id=ks-q class=ksin placeholder="关键词(留空=最新种子)" style="flex:1;min-width:150px">
@@ -2466,7 +2473,7 @@ def keepseed_worker():
             try:
                 data = prowlarr_download(url)
                 if data[:1] != b'd': raise RuntimeError("非种子文件")
-                res = QB().add(data, category="保种", tags="packseed,keepseed")
+                res = QB().add(data, category="保种", tags="packseed,keepseed", savepath=CFG["KEEP_DIR"])
                 st, err = ("pushed", "") if "Ok" in res else ("error", (res.strip()[:40] or "qb拒绝"))
             except Exception as e:
                 st, err = "error", str(e)[:60]
