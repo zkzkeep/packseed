@@ -852,15 +852,23 @@ function doSearch(){
    var inf=document.createElement('div');
    var t=document.createElement('div');t.className='gt';t.textContent=g.name+(g.year?' ('+g.year+')':'')+' ';
    var b=document.createElement('span');b.className='src';b.textContent=(g.mtype=='tv'?'剧集':'电影')+' · '+g.results.length+'个种';t.appendChild(b);
+   var ar=document.createElement('span');ar.className='mut';ar.style.marginLeft='8px';ar.textContent='▸ 点开选站下载';t.appendChild(ar);
    var ov=document.createElement('div');ov.className='mut gov';ov.textContent=g.overview||'';
    inf.appendChild(t);inf.appendChild(ov);hd.appendChild(inf);
-   sec.appendChild(hd);sec.appendChild(mkTable(g.results));
+   var tw=document.createElement('div');tw.style.display='none';tw.appendChild(mkTable(g.results));
+   hd.style.cursor='pointer';
+   hd.onclick=function(){var open=tw.style.display!=='none';tw.style.display=open?'none':'block';ar.textContent=open?'▸ 点开选站下载':'▾ 收起';};
+   sec.appendChild(hd);sec.appendChild(tw);
    box.appendChild(sec);
   });
   if(ot.length){
    var sec=document.createElement('div');sec.className='grpsec';
-   var oh=document.createElement('div');oh.className='gt';oh.style.padding='12px 16px 0';oh.textContent='🧩 未识别 / 其他 ('+ot.length+')';
-   sec.appendChild(oh);sec.appendChild(mkTable(ot));box.appendChild(sec);
+   var oh=document.createElement('div');oh.className='gt';oh.style.cssText='padding:12px 16px;cursor:pointer';
+   var oa=document.createElement('span');oa.className='mut';oa.style.marginLeft='8px';oa.textContent='▸ 展开';
+   oh.textContent='🧩 未识别 / 其他 ('+ot.length+') ';oh.appendChild(oa);
+   var otw=document.createElement('div');otw.style.display='none';otw.appendChild(mkTable(ot));
+   oh.onclick=function(){var open=otw.style.display!=='none';otw.style.display=open?'none':'block';oa.textContent=open?'▸ 展开':'▾ 收起';};
+   sec.appendChild(oh);sec.appendChild(otw);box.appendChild(sec);
   }
  }).catch(e=>{box.innerHTML='<div class=mut style="padding:10px 16px">搜索出错</div>';});
 }
