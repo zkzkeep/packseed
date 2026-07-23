@@ -798,13 +798,21 @@ a{color:var(--acc)}
 .pcard .ph{width:100%;aspect-ratio:2/3;border-radius:9px;background:#20232e;display:flex;align-items:center;justify-content:center;font-size:34px}
 .pname{font-size:13px;font-weight:600;margin-top:7px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .pmeta{font-size:11px;color:var(--sub);margin-top:2px}
+.pbar{height:6px;background:#20232e;border-radius:4px;margin-top:7px;overflow:hidden}
+.pbar i{display:block;height:100%;background:var(--acc);border-radius:4px;transition:width .5s}
+.pbar i.full{background:var(--ok)}
 </style></head><body><div class=wrap>
 <h1>🌱 PackSeed</h1><div class=sub>搜索下载 · 刮削入库 · 转种保种 · 全站辅种 —— 全自动</div>
 <div class=tabs>
 <a href="#search" class="tabbtn" data-t="search">🔍 搜索下载</a>
+<a href="#dl" class="tabbtn" data-t="dl">⬇️ 下载</a>
 <a href="#media" class="tabbtn" data-t="media">📥 整理入库</a>
 <a href="#seed" class="tabbtn" data-t="seed">🌱 辅种</a>
 <a href="#logs" class="tabbtn" data-t="logs">📋 日志</a>
+</div>
+<div id=tab-dl class=tab>
+<div class=card><h2>⬇️ 下载中 <span class=mut style=font-weight:400>· qb 实时进度 · 4 秒刷新 · 下载完自动入库+转种,随后见「整理入库」</span></h2><div id=dlist style="padding:2px 16px 12px"><span class=mut>载入中…</span></div></div>
+<div class=card><h2>最近完成的流水线</h2><div id=ddone></div></div>
 </div>
 <div id=tab-search class=tab>
 <div class=card><h2>🔍 搜索下载 <span class=mut style=font-weight:400>· 选类型缩小范围 · 海报墙点选 · 一键下到 qb</span></h2>
@@ -836,11 +844,52 @@ a{color:var(--acc)}
 <div class=sub style=text-align:center>PackSeed · 一个人的 PT 全家桶 · MIT 开源</div>
 </div><div id=toast></div>
 <script>
+var _dlT=null;
 function showTab(t){
  document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
  document.querySelectorAll('.tabbtn').forEach(e=>e.classList.remove('on'));
  var el=document.getElementById('tab-'+t);(el||document.getElementById('tab-search')).classList.add('active');
  var b=document.querySelector('.tabbtn[data-t="'+(el?t:'search')+'"]');if(b)b.classList.add('on');
+ clearInterval(_dlT);
+ if(t=='dl'){clearTimeout(_t);pollDl();_dlT=setInterval(pollDl,4000);}
+}
+var SM={downloading:'⬇️ 下载中',stalledDL:'🐢 等速度',metaDL:'🧲 元数据',forcedDL:'⬇️ 下载中',pausedDL:'⏸ 暂停',queuedDL:'⏳ 排队',allocating:'分配空间',uploading:'✅ 完成·待转种',stalledUP:'✅ 完成·待转种',queuedUP:'✅ 完成·待转种',forcedUP:'✅ 完成·待转种',checkingDL:'🔍 校验中',checkingUP:'🔍 校验中',checkingResumeData:'🔍 校验中',error:'❌ 错误',missingFiles:'❌ 文件缺失'};
+var STM={done:['✅ 已入库+转种','done'],hold:['⚠️ 待确认(去整理入库页处理)','nomatch'],processing:['🔄 整理中','searching'],error:['❌ 出错','err']};
+function pollDl(){
+ fetch('/api/downloads').then(r=>r.json()).then(function(d){
+  var el=document.getElementById('dlist');if(!el)return;
+  var dl=d.dl||[];
+  if(d.err){el.innerHTML='<span class=mut>qb 连接失败：'+d.err+'</span>';}
+  else if(!dl.length){el.innerHTML='<span class=mut>qb 里暂无任务 —— 下载完成的会自动入库+转种到 tr,见下方记录</span>';}
+  else{
+   el.innerHTML='';
+   dl.forEach(function(t){
+    var row=document.createElement('div');row.style.cssText='padding:9px 0;border-bottom:1px solid var(--line)';
+    var l1=document.createElement('div');l1.style.cssText='display:flex;justify-content:space-between;gap:12px;font-size:13px;align-items:baseline';
+    var n=document.createElement('div');n.className='sname';n.style.maxWidth='620px';n.title=t.name;n.textContent=t.name;
+    var i=document.createElement('div');i.className='mut';i.style.whiteSpace='nowrap';
+    i.textContent=(SM[t.state]||t.state)+' · '+t.sizeh+' · '+t.speed+(t.eta?' · 剩'+t.eta:'')+' · 做种'+t.seeds+' · '+t.progress+'%';
+    l1.appendChild(n);l1.appendChild(i);
+    var pb=document.createElement('div');pb.className='pbar';var pi=document.createElement('i');
+    pi.style.width=t.progress+'%';if(t.progress>=100)pi.className='full';pb.appendChild(pi);
+    row.appendChild(l1);row.appendChild(pb);el.appendChild(row);
+   });
+  }
+  var dd=document.getElementById('ddone');if(!dd)return;
+  dd.innerHTML='';
+  var tbl=document.createElement('table');
+  var hd=document.createElement('tr');hd.innerHTML='<th style=width:110px>时间</th><th>下载名</th><th>识别为</th><th>状态</th>';tbl.appendChild(hd);
+  (d.done||[]).forEach(function(x){
+   var tr=document.createElement('tr');
+   var c1=document.createElement('td');c1.className='mut';c1.textContent=x.ts;
+   var c2=document.createElement('td');c2.className='sname';c2.style.maxWidth='380px';c2.title=x.name;c2.textContent=x.name;
+   var c3=document.createElement('td');c3.textContent=x.tmdb;
+   var st=STM[x.status]||[x.status,'err'];
+   var c4=document.createElement('td');var sp=document.createElement('span');sp.className='b '+st[1];sp.textContent=st[0];c4.appendChild(sp);
+   tr.appendChild(c1);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tbl.appendChild(tr);
+  });
+  dd.appendChild(tbl);
+ }).catch(()=>{});
 }
 showTab((location.hash||'#search').slice(1));
 window.addEventListener('hashchange',function(){showTab(location.hash.slice(1)||'search');});
@@ -927,7 +976,7 @@ function doSearch(){
 function dl(b,u){
  b.disabled=true;b.textContent='下载中…';
  fetch('/api/dl?url='+encodeURIComponent(u)).then(r=>r.json()).then(function(d){
-  if(d.ok){b.textContent='✅ 已下';b.style.background='var(--ok)';toast('已推送到 qb 下载');}
+  if(d.ok){b.textContent='✅ 已下';b.style.background='var(--ok)';toast('已推送下载,点「⬇️ 下载」页看实时进度');}
   else{b.textContent='失败';b.disabled=false;toast('下载失败：'+(d.err||''));}
  }).catch(e=>{b.textContent='失败';b.disabled=false;toast('下载出错');});
 }
@@ -1005,6 +1054,8 @@ class Handler(BaseHTTPRequestHandler):
             s._reid(); return
         if s.path.startswith("/api/poster"):
             s._poster(); return
+        if s.path.startswith("/api/downloads"):
+            s._downloads(); return
         if s.path.startswith("/api"):
             s._json(); return
         c = db()
@@ -1158,6 +1209,26 @@ class Handler(BaseHTTPRequestHandler):
         # 海报墙按最高做种数排(结果本身已按做种降序,首个即最高)
         glist = sorted(groups.values(), key=lambda g: -(g["results"][0]["seeders"] if g["results"] else 0))
         s._send_json({"ok": True, "groups": glist, "other": other})
+    def _downloads(s):
+        out = {"dl": [], "done": []}
+        try:
+            for t in QB().torrents():
+                eta = t.get("eta", 0) or 0; prog = (t.get("progress") or 0)
+                if eta >= 8640000 or prog >= 1: etas = ""
+                elif eta >= 3600: etas = f"{eta//3600}时{eta%3600//60}分"
+                elif eta >= 60: etas = f"{eta//60}分{eta%60}秒"
+                else: etas = f"{eta}秒"
+                out["dl"].append({"name": t.get("name",""), "progress": round(prog*100, 1),
+                                  "sizeh": human_size(t.get("size",0)), "speed": human_size(t.get("dlspeed",0))+"/s",
+                                  "eta": etas, "state": t.get("state",""), "seeds": t.get("num_seeds",0)})
+        except Exception as e:
+            out["err"] = str(e)[:60]
+        c = db()
+        for r in c.execute("SELECT name,cat,tmdb_name,year,status,ts FROM media ORDER BY ts DESC LIMIT 10").fetchall():
+            out["done"].append({"name": r[0], "cat": r[1] or "", "tmdb": (f"{r[2]} ({r[3]})" if r[2] else "—"),
+                                "status": r[4], "ts": time.strftime("%m-%d %H:%M", time.localtime(r[5] or 0))})
+        c.close()
+        s._send_json(out)
     def _poster(s):
         # 海报代理：TMDB 图片国内不通，走 TMDB_PROXY 抓取并缓存在 /config/posters
         from urllib.parse import urlparse, parse_qs
