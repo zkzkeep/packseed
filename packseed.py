@@ -30,6 +30,13 @@ CFG = {
     "QB_CATEGORY":  os.environ.get("QB_CATEGORY", ""),     # 兜底分类，留空则按识别的类型(电影/电视剧/动漫)
     "MIN_SEEDERS":  int(os.environ.get("MIN_SEEDERS", "20")),  # 搜索结果做种数门槛;整体都低时保留前20%
     "TR_BAN_SITES": os.environ.get("TR_BAN_SITES", ""),   # ban了tr客户端的站(tr3.00全站通行,默认空)
+    # —— 企业微信通知(从 MP 迁移) ——
+    "WECOM_CORPID": os.environ.get("WECOM_CORPID", ""),
+    "WECOM_SECRET": os.environ.get("WECOM_SECRET", ""),
+    "WECOM_AGENTID":os.environ.get("WECOM_AGENTID", ""),
+    "WECOM_PROXY":  os.environ.get("WECOM_PROXY", ""),     # 企微API代理,留空直连 qyapi.weixin.qq.com
+    "NOTIFY_START": int(os.environ.get("NOTIFY_START", "9")),   # 免打扰:只在此小时段内推送
+    "NOTIFY_END":   int(os.environ.get("NOTIFY_END", "22")),
     # —— 整理器（识别+刮削入库）——
     "TMDB_KEY":     os.environ.get("TMDB_KEY", ""),
     "TMDB_PROXY":   os.environ.get("TMDB_PROXY", ""),      # TMDB 走代理(国内需要)，如 http://x:7890
@@ -88,6 +95,39 @@ def init_db():
     try: c.execute("ALTER TABLE media ADD COLUMN save TEXT")   # 下载内容的磁盘路径(content_path)
     except Exception: pass
     c.commit(); c.close()
+
+_WECOM = {"tok": "", "exp": 0}
+def notify(title, text=""):
+    """企业微信应用消息推送(MP同款渠道)。token缓存~110分钟;免打扰时段外静默"""
+    if not (CFG["WECOM_CORPID"] and CFG["WECOM_SECRET"] and CFG["WECOM_AGENTID"]):
+        return
+    h = time.localtime().tm_hour
+    if not (CFG["NOTIFY_START"] <= h < CFG["NOTIFY_END"]):
+        return
+    base = (CFG["WECOM_PROXY"] or "https://qyapi.weixin.qq.com").rstrip("/")
+    op = _tmdb_opener()   # 走 mihomo:qyapi 被路由到 VPS 固定出口IP(企微白名单IP);出口偶尔漂WARP会握手超时,靠重试
+    last = ""
+    for attempt in range(3):
+        try:
+            if time.time() > _WECOM["exp"] or not _WECOM["tok"]:
+                d = json.load(op.open(
+                    f"{base}/cgi-bin/gettoken?corpid={CFG['WECOM_CORPID']}&corpsecret={CFG['WECOM_SECRET']}", timeout=15))
+                _WECOM["tok"] = d.get("access_token", ""); _WECOM["exp"] = time.time() + 6600
+            content = (title + ("\n" + text if text else "")).strip()
+            body = json.dumps({"touser": "@all", "msgtype": "text", "agentid": int(CFG["WECOM_AGENTID"]),
+                               "text": {"content": content}}).encode()
+            r = json.load(op.open(urllib.request.Request(
+                f"{base}/cgi-bin/message/send?access_token={_WECOM['tok']}", data=body,
+                headers={"Content-Type": "application/json"}), timeout=15))
+            if r.get("errcode") == 0:
+                return
+            last = str(r.get("errmsg", ""))[:50]
+            if r.get("errcode") in (40014, 42001, 41001):   # token失效类,刷新重试
+                _WECOM["tok"] = ""; _WECOM["exp"] = 0
+        except Exception as e:
+            last = str(e)[:50]
+        time.sleep(2)
+    logmsg("WARN", f"通知3次未达: {last}")
 
 def logmsg(level, msg):
     try:
@@ -640,6 +680,7 @@ def organize_music(ih, name, files):
     lrc = fetch_lyrics(files, root)
     cov = fetch_covers(files, root)
     logmsg("INFO", f"音乐入库 {name[:44]} | {n}个文件 + {lrc}首歌词 + {cov}张封面 → {root}")
+    notify("🎵 音乐已入库", f"{name[:56]}\n{n}个文件 · {lrc}首歌词 · {cov}张封面,Navidrome可听")
     return root, n
 
 def _xesc(s): return (str(s or "")).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -759,6 +800,7 @@ def do_organize(ih, name, files, m, cat):
     c = db(); c.execute("UPDATE media SET target=?, files=?, status='done' WHERE info_hash=?", (dest, n, ih)); c.commit(); c.close()
     logmsg("INFO", f"入库 {m['tmdb_name']} ({m['year']}) ← {name[:36]} | {n}个文件 → {dest}")
     emby_refresh()
+    notify(f"📥 已入库 · {m['tmdb_name']} ({m['year']})", f"{cat} · {n}个文件,Emby可看\n{name[:56]}")
     return dest, n
 
 def hold_media(ih, name, cat, reason):
@@ -767,6 +809,7 @@ def hold_media(ih, name, cat, reason):
               (ih, name, cat, "", None, "", "", "", "", "hold", 0, int(time.time())))
     c.commit(); c.close()
     logmsg("WARN", f"整理待确认({reason}): {name[:44]}")
+    notify("⚠️ 入库待确认", f"{name[:56]}\n{reason},去面板『整理入库』填片名或TMDB id一键入库")
 
 def transfer_to_tr(qb, ih, name, save_path):
     """qb→tr 转种：tr 指向同一数据目录，校验后从 qb 删任务(数据保留)"""
@@ -1021,6 +1064,8 @@ def run_match(tr, t, queries, manual=False, pre_results=None):
     c = db(); c.execute("UPDATE torrents SET status=?, matched=?, injected=? WHERE info_hash=?",
               ("done" if matched else "no_match", matched, injected, ih)); c.commit(); c.close()
     logmsg("INFO", f"{'手动' if manual else ''}辅种 {name[:40]} | 命中[{used}] 匹配{matched} 注入{injected}")
+    if injected > 0:
+        notify(f"🌱 辅种 +{injected} 站", name[:56])
 
 def cross_seed_one(tr, t):
     # 自动关键词：中文主搜 + 英文兜底
