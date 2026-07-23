@@ -403,6 +403,18 @@ def tmdb_match(name):
                      re.search(r'(^|\W)' + re.escape(n) + r'(\W|$)', ql):
                     return True
             return False
+        def _alt_fit(r):
+            # 终审：查该条目的官方别名(各语言译名)。射雕的别名含 The Legend of the Condor Heroes → 放行；
+            # Sakrament 的别名不含 Sakra → 拦截。只在歧义分支调用，多一次 API 换准确率。
+            try:
+                mt = "tv" if r.get("media_type") == "tv" else "movie"
+                d = _tmdb_call(f"/{mt}/{r['id']}/alternative_titles")
+                alts = [t.get("title","") for t in (d.get("results") or d.get("titles") or [])]
+                norm = lambda x: re.sub(r'[^a-z0-9一-鿿]', '', x.lower())
+                qn = norm(q)
+                return any(qn and (qn == norm(t) or qn in norm(t) or norm(t) in qn) for t in alts if t)
+            except Exception:
+                return False
         exact = [r for r in cand if q in _names(r)]
         if year:
             ye = [r for r in cand if _ryear(r) == year]
@@ -411,9 +423,12 @@ def tmdb_match(name):
             if exact_ye:  pick = (exact_ye[0], "high")
             elif ye_fit:  pick = (ye_fit[0], "high")
             elif exact:   pick = (exact[0], "high")   # 名字精确但年份解析错了(请回答1988型)
+            elif ye and _alt_fit(ye[0]): pick = (ye[0], "high")   # 别名验证通过(英文译名场景)
             else:         pick = ((ye[0], "low") if ye else (cand[0], "low"))
         else:
-            pick = (exact[0], "high") if exact else (cand[0], "mid")
+            if exact: pick = (exact[0], "high")
+            elif _namefit(cand[0]) or _alt_fit(cand[0]): pick = (cand[0], "mid")
+            else: pick = (cand[0], "low")
         r, conf = pick
         if conf=="low" and q==tc and te and te.lower()!=tc.lower(): continue  # 中文低置信→再试英文
         return {"mtype":"tv" if r.get("media_type")=="tv" else "movie","id":r.get("id"),
@@ -908,7 +923,9 @@ function mkTable(rs){
  var hd=document.createElement('tr');hd.innerHTML='<th>标题</th><th>站点</th><th class=r>大小</th><th class=r>做种</th><th></th>';tbl.appendChild(hd);
  rs.forEach(function(x){
   var tr=document.createElement('tr');
-  var c1=document.createElement('td');c1.className='sname';c1.title=x.title;c1.textContent=x.title;
+  var c1=document.createElement('td');c1.className='sname';c1.title=x.title+'（点击打开站点种子详情页）';
+  if(x.info){var a=document.createElement('a');a.href=x.info;a.target='_blank';a.rel='noreferrer';a.textContent=x.title;a.style.color='var(--fg)';c1.appendChild(a);}
+  else{c1.textContent=x.title;}
   var c2=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=x.site;c2.appendChild(sp);
   var c3=document.createElement('td');c3.className='r';c3.textContent=x.sizeh;
   var c4=document.createElement('td');c4.className='r';c4.textContent=x.seeders;
@@ -1170,7 +1187,7 @@ class Handler(BaseHTTPRequestHandler):
             if not url: continue
             out.append({"title": r.get("title",""), "site": r.get("indexer",""),
                         "sizeh": human_size(r.get("size",0)), "seeders": r.get("seeders") or 0,
-                        "url": url, "cat": catlab(r)})
+                        "url": url, "cat": catlab(r), "info": r.get("infoUrl") or ""})
         out.sort(key=lambda x: x["seeders"], reverse=True)
         out = out[:100]
         # 识别分组(MP式)：按提取词归并，最多对8个不同内容做 TMDB 识别，配海报好分辨
