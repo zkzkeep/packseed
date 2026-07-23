@@ -599,8 +599,10 @@ def qb_watcher():
         time.sleep(60)
 
 # ============ Prowlarr ============
-def prowlarr_search(query):
+def prowlarr_search(query, cats=None):
     u = CFG["PROWLARR_URL"] + "/api/v1/search?query=" + urllib.parse.quote(query) + "&type=search"
+    for c in (cats or []):          # Torznab 分类: 2000影 5000剧 5070动漫 7030漫画 3000音乐
+        u += "&categories=" + str(c)
     req = urllib.request.Request(u, headers={"X-Api-Key":CFG["PROWLARR_KEY"]})
     return json.load(urllib.request.urlopen(req, timeout=150))
 def prowlarr_download(url):
@@ -768,10 +770,17 @@ a{color:var(--acc)}
 .tabbtn:hover{border-color:var(--acc)}.tabbtn.on{background:var(--acc);color:#fff;border-color:var(--acc)}
 .tab{display:none}.tab.active{display:block}
 .grpsec{border-top:1px solid var(--line);margin-top:6px}
-.grp{display:flex;gap:14px;padding:14px 16px 6px;align-items:flex-start}
-.pos{width:64px;height:96px;object-fit:cover;border-radius:8px;background:#20232e;flex-shrink:0}
 .gt{font-size:15px;font-weight:700;margin-bottom:4px}
-.gov{font-size:12px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.fbar{display:flex;gap:8px;padding:0 16px 12px;flex-wrap:wrap;align-items:center}
+.fpill{padding:5px 15px;border-radius:20px;border:1px solid var(--line);background:var(--bg);cursor:pointer;font-size:13px;user-select:none}
+.fpill.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:16px;padding:14px 16px}
+.pcard{cursor:pointer;border-radius:12px;padding:6px;border:2px solid transparent;transition:.15s}
+.pcard:hover{background:#20232e}.pcard.sel{border-color:var(--acc);background:#20232e}
+.pcard .pw{width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:9px;background:#20232e;display:block}
+.pcard .ph{width:100%;aspect-ratio:2/3;border-radius:9px;background:#20232e;display:flex;align-items:center;justify-content:center;font-size:34px}
+.pname{font-size:13px;font-weight:600;margin-top:7px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pmeta{font-size:11px;color:var(--sub);margin-top:2px}
 </style></head><body><div class=wrap>
 <h1>🌱 PackSeed</h1><div class=sub>搜索下载 · 刮削入库 · 转种保种 · 全站辅种 —— 全自动</div>
 <div class=tabs>
@@ -781,8 +790,15 @@ a{color:var(--acc)}
 <a href="#logs" class="tabbtn" data-t="logs">📋 日志</a>
 </div>
 <div id=tab-search class=tab>
-<div class=card><h2>🔍 搜索下载 <span class=mut style=font-weight:400>· 全站搜索 · 自动识别分组配海报 · 一键下到 qb</span></h2>
-<div class=searchbar><input id=q placeholder="输入剧名 / 电影名 / 动漫名，回车搜索" onkeydown="if(event.key=='Enter')doSearch()"><button onclick=doSearch()>搜索</button></div>
+<div class=card><h2>🔍 搜索下载 <span class=mut style=font-weight:400>· 选类型缩小范围 · 海报墙点选 · 一键下到 qb</span></h2>
+<div class=searchbar><input id=q placeholder="输入片名，回车搜索" onkeydown="if(event.key=='Enter')doSearch()"><button onclick=doSearch()>搜索</button></div>
+<div class=fbar><span class=mut style=font-size:12px>类型:</span>
+<span class=fpill data-c=2000 onclick=tgF(this)>🎬 电影</span>
+<span class=fpill data-c=5000 onclick=tgF(this)>📺 电视剧</span>
+<span class=fpill data-c=5070 onclick=tgF(this)>🎌 动漫</span>
+<span class=fpill data-c=7030 onclick=tgF(this)>📖 漫画</span>
+<span class=fpill data-c=3000 onclick=tgF(this)>🎵 音乐</span>
+<span class=mut style=font-size:12px>· 不选=全部</span></div>
 <div id=sresult></div></div>
 </div>
 <div id=tab-media class=tab>
@@ -835,41 +851,47 @@ function mkTable(rs){
  });
  return tbl;
 }
+function tgF(el){el.classList.toggle('on');}
 function doSearch(){
  var q=document.getElementById('q').value.trim();if(!q)return;
  clearTimeout(_t);
+ var cats=Array.from(document.querySelectorAll('.fpill.on')).map(e=>e.dataset.c).join(',');
  var box=document.getElementById('sresult');
  box.innerHTML='<div class=mut style="padding:10px 16px">搜索中…（全站搜索+识别配图约 40~70 秒，稍候）</div>';
- fetch('/api/search?q='+encodeURIComponent(q)).then(r=>r.json()).then(function(d){
+ fetch('/api/search?q='+encodeURIComponent(q)+(cats?'&cats='+cats:'')).then(r=>r.json()).then(function(d){
   if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">搜索失败：'+(d.err||'')+'</div>';return;}
   var gs=d.groups||[],ot=d.other||[];
   if(!gs.length&&!ot.length){box.innerHTML='<div class=mut style="padding:10px 16px">没搜到结果，换个关键词试试</div>';return;}
   box.innerHTML='';
+  var wall=document.createElement('div');wall.className='wall';
+  var sel=document.createElement('div');sel.id='selres';
+  function pick(card,g,label){
+   document.querySelectorAll('.pcard').forEach(c=>c.classList.remove('sel'));
+   card.classList.add('sel');sel.innerHTML='';
+   var hd=document.createElement('div');hd.className='gt';hd.style.padding='6px 16px 0';
+   hd.textContent=label+' — 选择站点下载';sel.appendChild(hd);
+   sel.appendChild(mkTable(g));
+   sel.scrollIntoView({behavior:'smooth',block:'nearest'});
+  }
   gs.forEach(function(g){
-   var sec=document.createElement('div');sec.className='grpsec';
-   var hd=document.createElement('div');hd.className='grp';
-   if(g.poster){var im=document.createElement('img');im.className='pos';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(g.poster);hd.appendChild(im);}
-   var inf=document.createElement('div');
-   var t=document.createElement('div');t.className='gt';t.textContent=g.name+(g.year?' ('+g.year+')':'')+' ';
-   var b=document.createElement('span');b.className='src';b.textContent=(g.mtype=='tv'?'剧集':'电影')+' · '+g.results.length+'个种';t.appendChild(b);
-   var ar=document.createElement('span');ar.className='mut';ar.style.marginLeft='8px';ar.textContent='▸ 点开选站下载';t.appendChild(ar);
-   var ov=document.createElement('div');ov.className='mut gov';ov.textContent=g.overview||'';
-   inf.appendChild(t);inf.appendChild(ov);hd.appendChild(inf);
-   var tw=document.createElement('div');tw.style.display='none';tw.appendChild(mkTable(g.results));
-   hd.style.cursor='pointer';
-   hd.onclick=function(){var open=tw.style.display!=='none';tw.style.display=open?'none':'block';ar.textContent=open?'▸ 点开选站下载':'▾ 收起';};
-   sec.appendChild(hd);sec.appendChild(tw);
-   box.appendChild(sec);
+   var card=document.createElement('div');card.className='pcard';
+   if(g.poster){var im=document.createElement('img');im.className='pw';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(g.poster);card.appendChild(im);}
+   else{var ph=document.createElement('div');ph.className='ph';ph.textContent=g.mtype=='tv'?'📺':'🎬';card.appendChild(ph);}
+   var nm=document.createElement('div');nm.className='pname';nm.textContent=g.name+(g.year?' ('+g.year+')':'');card.appendChild(nm);
+   var mt=document.createElement('div');mt.className='pmeta';mt.textContent=(g.mtype=='tv'?'剧集':'电影')+' · '+g.results.length+' 个种';card.appendChild(mt);
+   card.title=g.overview||'';
+   card.onclick=function(){pick(card,g.results,g.name+(g.year?' ('+g.year+')':''));};
+   wall.appendChild(card);
   });
   if(ot.length){
-   var sec=document.createElement('div');sec.className='grpsec';
-   var oh=document.createElement('div');oh.className='gt';oh.style.cssText='padding:12px 16px;cursor:pointer';
-   var oa=document.createElement('span');oa.className='mut';oa.style.marginLeft='8px';oa.textContent='▸ 展开';
-   oh.textContent='🧩 未识别 / 其他 ('+ot.length+') ';oh.appendChild(oa);
-   var otw=document.createElement('div');otw.style.display='none';otw.appendChild(mkTable(ot));
-   oh.onclick=function(){var open=otw.style.display!=='none';otw.style.display=open?'none':'block';oa.textContent=open?'▸ 展开':'▾ 收起';};
-   sec.appendChild(oh);sec.appendChild(otw);box.appendChild(sec);
+   var card=document.createElement('div');card.className='pcard';
+   var ph=document.createElement('div');ph.className='ph';ph.textContent='🧩';card.appendChild(ph);
+   var nm=document.createElement('div');nm.className='pname';nm.textContent='未识别 / 其他';card.appendChild(nm);
+   var mt=document.createElement('div');mt.className='pmeta';mt.textContent=ot.length+' 个种';card.appendChild(mt);
+   card.onclick=function(){pick(card,ot,'未识别 / 其他');};
+   wall.appendChild(card);
   }
+  box.appendChild(wall);box.appendChild(sel);
  }).catch(e=>{box.innerHTML='<div class=mut style="padding:10px 16px">搜索出错</div>';});
 }
 function dl(b,u){
@@ -1045,10 +1067,12 @@ class Handler(BaseHTTPRequestHandler):
             logmsg("ERROR", f"手动入库异常: {e}"); s._send_json({"ok":False,"err":str(e)[:80]})
     def _search(s):
         from urllib.parse import urlparse, parse_qs
-        q = (parse_qs(urlparse(s.path).query).get("q",[""])[0]).strip()
+        qs = parse_qs(urlparse(s.path).query)
+        q = (qs.get("q",[""])[0]).strip()
+        cats = [c for c in (qs.get("cats",[""])[0]).split(",") if c.isdigit()]
         if not q: s._send_json({"ok":False,"err":"关键词为空"}); return
         try:
-            results = prowlarr_search(q)
+            results = prowlarr_search(q, cats)
         except Exception as e:
             logmsg("WARN", f"搜索下载查询失败[{q}]: {e}"); s._send_json({"ok":False,"err":str(e)[:80]}); return
         out = []
