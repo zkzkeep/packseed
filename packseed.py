@@ -900,7 +900,7 @@ function pollDl(){
     var cx=document.createElement('button');cx.className='dlbtn';cx.style.cssText='background:transparent;border:1px solid var(--line);color:var(--sub);flex-shrink:0';
     cx.textContent='✕ 取消';
     cx.onclick=function(){
-     if(!confirm('取消下载「'+(t.tmdb||t.name.slice(0,30))+'」?\n将从 qb 移除任务并删除已下载的数据。'))return;
+     if(!confirm('取消下载「'+(t.tmdb||t.name.slice(0,30))+'」? 将从 qb 移除任务并删除已下载的数据。'))return;
      cx.disabled=true;cx.textContent='取消中…';
      fetch('/api/canceldl?hash='+encodeURIComponent(t.hash)).then(r=>r.json()).then(function(d){
       if(d.ok){toast('已取消并清理');pollDl();}
