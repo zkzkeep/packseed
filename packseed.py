@@ -1767,26 +1767,27 @@ select.ksin option{color:#00206e}
 </div>
 <div id=tab-keep class=tab>
 <div class=card><h2>🌊 批量保种 <span class=mut style=font-weight:400>· 选站拉列表 → 筛选勾选 → 批量推 qb,下载完自动转 tr 做种 · 隔离在保种专用目录:不辅种/不入库/不打扰正常流水线,到期删目录即清仓 · 磁盘低于保护线自动暂停</span></h2>
-<div style="padding:4px 20px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+<div style="padding:4px 20px 8px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
+<span style="font-weight:800">① 选站和条件</span>
 <select id=ks-ix class=ksin style="min-width:160px"><option value="">加载站点中…</option></select>
-<input id=ks-q class=ksin placeholder="关键词(留空=最新种子)" style="flex:1;min-width:150px">
-<button class=dlbtn onclick="ksFetch(false,this)">拉取列表</button>
-<button class=dlbtn style="background:rgba(255,255,255,.2);color:#fff" onclick="ksFetch(true,this)">加载更多</button>
+<input id=ks-q class=ksin placeholder="关键词(留空=全站最新)" style="flex:1;min-width:140px">
+<span class=mut>|</span>
+单种体积≤<input id=ks-fsize class=ksin style="width:64px" placeholder="不限" oninput="ksRender()">GB
+做种数≤<input id=ks-fseed class=ksin style="width:56px" placeholder="不限" oninput="ksRender()"><span class=mut>(只保濒危种填如 3;都留空=什么都要)</span>
 </div>
-<div style="padding:0 20px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
-<span class=mut>筛选:</span>
-体积≤<input id=ks-fsize class=ksin style="width:70px" placeholder="GB">GB
-做种数≤<input id=ks-fseed class=ksin style="width:60px" placeholder="如 3">
-<span class=mut>(保濒危种就填个小数字)</span>
-<button class=dlbtn style="padding:7px 16px" onclick="ksRender()">应用</button>
-<button class=dlbtn style="padding:7px 16px;background:rgba(255,255,255,.2);color:#fff" onclick="ksAll()">全选显示项</button>
-<button class=dlbtn style="padding:7px 20px;background:var(--pop);color:#00206e" onclick="ksPush(this)">⬇️ 推送选中保种</button>
+<div style="margin:6px 20px 8px;padding:12px 16px;background:rgba(255,212,0,.13);border:1px solid rgba(255,212,0,.4);border-radius:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
+<span style="font-weight:800">② 🤖 全自动保种(推荐)</span>
+共保<input id=ks-tgt class=ksin style="width:80px" placeholder="2048">GB
+<button class=dlbtn style="padding:8px 24px;background:var(--pop);color:#00206e" onclick="ksAuto(this)">🚀 开始自动保种</button>
+<span class=mut>就这一个按钮:自动翻页拉取整站,按①的条件过滤,已有的跳过,边拉边下,够量自动停。2T=2048</span>
 </div>
-<div style="padding:0 20px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px;border-top:1px solid var(--line);margin:0 20px;padding-top:12px">
-<span style="font-weight:700">🤖 自动拉满:</span>
-目标量<input id=ks-tgt class=ksin style="width:80px" placeholder="2048">GB
-<button class=dlbtn style="padding:7px 20px;background:var(--pop);color:#00206e" onclick="ksAuto(this)">🤖 自动拉满目标量</button>
-<span class=mut>后台自动翻页,套用上面的站点/关键词/筛选,去重(队列+tr已有),边拉边下,够量收工。2T 填 2048</span>
+<div style="padding:2px 20px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
+<span style="font-weight:800">② ✋ 或手动挑选</span>
+<button class=dlbtn style="padding:7px 16px" onclick="ksFetch(false,this)">拉取列表</button>
+<button class=dlbtn style="padding:7px 14px;background:rgba(255,255,255,.2);color:#fff" onclick="ksFetch(true,this)">翻下一页</button>
+<span class=mut>→ 下面勾选 →</span>
+<button class=dlbtn style="padding:7px 14px;background:rgba(255,255,255,.2);color:#fff" onclick="ksAll()">全选</button>
+<button class=dlbtn style="padding:7px 18px;background:var(--pop);color:#00206e" onclick="ksPush(this)">⬇️ 推送选中</button>
 </div>
 <div id=ks-list style="padding:0 20px 16px"><span class=mut>选个站点开拉。空关键词=按站内最新排列。</span></div>
 </div>
@@ -1926,6 +1927,7 @@ function ksFiltered(){
   return true;});
 }
 function ksRender(){
+ if(!_ksItems.length)return;   // 还没拉过列表,别把提示语刷掉
  var el=document.getElementById('ks-list'),fs=ksFiltered();
  if(!fs.length){el.innerHTML='<span class=mut>没有符合条件的种子</span>';return;}
  var h='<table><tr><th style=width:30px></th><th>种子名</th><th class=r>体积</th><th class=r>做种</th><th>发布</th></tr>';
