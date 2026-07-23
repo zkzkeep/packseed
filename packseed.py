@@ -1484,7 +1484,7 @@ def scanner():
 # ============ 网页仪表盘 ============
 PAGE = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>观澜 GuanLan</title><style>
-:root{--ikb:#002FA7;--acc:#ffffff;--accL:#CFE0FF;--pop:#FFD400;--ok:#3ddc84;--warn:#ffd83d;--err:#ff8579;--fg:#fff;--sub:rgba(255,255,255,.68);--line:rgba(255,255,255,.15);--card:rgba(255,255,255,.09);--card2:rgba(255,255,255,.15)}
+:root{--ikb:#002FA7;--acc:#ffffff;--accL:#CFE0FF;--pop:#FFD400;--ok:#3ddc84;--warn:#ffd83d;--err:#ff8579;--fg:#fff;--sub:rgba(255,255,255,.68);--line:rgba(255,255,255,.24);--card:rgba(255,255,255,.17);--card2:rgba(255,255,255,.26)}
 *{box-sizing:border-box}::selection{background:rgba(255,255,255,.3)}
 body{margin:0;color:#fff;font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased;
 background:radial-gradient(1100px 520px at 85% -8%,rgba(255,255,255,.10),transparent 60%),linear-gradient(180deg,#0039c8 0%,#002FA7 38%,#001d77 100%);background-attachment:fixed;background-color:#002FA7}
@@ -1537,7 +1537,8 @@ a{color:var(--accL);text-decoration:none}
 .fpill.on{background:#fff;color:var(--ikb)}
 .wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(136px,1fr));gap:18px;padding:16px 20px}
 .pcard{cursor:pointer;border-radius:14px;transition:.22s cubic-bezier(.2,.8,.3,1)}
-.pcard:hover{transform:translateY(-3px)}
+.wall:hover .pcard{opacity:.7}
+.wall .pcard:hover{opacity:1;transform:translateY(-6px) scale(1.05);z-index:2}
 .pcard.sel .pw,.pcard.sel .ph{box-shadow:0 0 0 3px #fff,0 12px 32px rgba(0,10,60,.6)}
 .pcard .pw{width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:12px;background:var(--card2);display:block;transition:.22s;box-shadow:0 6px 18px rgba(0,10,60,.45)}
 .pcard:hover .pw{box-shadow:0 14px 36px rgba(0,10,60,.65)}
@@ -1562,9 +1563,12 @@ background-color:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px soli
 .hero .searchbar{max-width:780px;margin:0 auto;padding:0}
 .hero .fbar{justify-content:center;padding:18px 0 0}
 #sresult:not(:empty){background:var(--card);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:20px;margin-bottom:20px;overflow:hidden}
-.rstrip{display:flex;gap:14px;padding:12px 20px 20px;overflow-x:auto;scrollbar-width:thin}
-.rcard{flex:0 0 108px}
-.rcard img{width:108px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--card2);box-shadow:0 5px 16px rgba(0,10,60,.5);display:block}
+.rstrip{display:flex;gap:14px;padding:22px 20px 26px;overflow-x:auto;scrollbar-width:thin}
+.rcard{flex:0 0 108px;transition:transform .28s cubic-bezier(.2,.8,.3,1),opacity .28s ease;transform-origin:center 70%}
+.rstrip:hover .rcard{opacity:.62;transform:scale(.96)}
+.rstrip .rcard:hover{opacity:1;transform:scale(1.16) translateY(-8px);z-index:2;position:relative}
+.rcard img{width:108px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--card2);box-shadow:0 5px 16px rgba(0,10,60,.5);display:block;transition:box-shadow .28s ease}
+.rstrip .rcard:hover img{box-shadow:0 16px 40px rgba(0,10,60,.7)}
 .rname{font-size:12px;font-weight:600;margin-top:7px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ryear{font-size:11px;color:var(--sub);margin-top:1px}
 </style></head><body><div class=wrap>
@@ -1803,7 +1807,7 @@ function reid(h,el){
 
 DETAIL = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>种子详情 · 观澜</title><style>
-:root{--ikb:#002FA7;--acc:#fff;--accL:#CFE0FF;--ok:#3ddc84;--warn:#ffd83d;--fg:#fff;--sub:rgba(255,255,255,.68);--line:rgba(255,255,255,.15);--card:rgba(255,255,255,.09)}
+:root{--ikb:#002FA7;--acc:#fff;--accL:#CFE0FF;--ok:#3ddc84;--warn:#ffd83d;--fg:#fff;--sub:rgba(255,255,255,.68);--line:rgba(255,255,255,.24);--card:rgba(255,255,255,.17)}
 *{box-sizing:border-box}body{margin:0;color:#fff;font:14px/1.6 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased;
 background:linear-gradient(180deg,#0039c8 0%,#002FA7 38%,#001d77 100%);background-attachment:fixed;background-color:#002FA7}
 .wrap{max-width:840px;margin:0 auto;padding:32px 28px}a{color:var(--accL);text-decoration:none}
