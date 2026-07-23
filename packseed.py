@@ -1569,7 +1569,7 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 .hero .fbar{justify-content:center;padding:18px 0 0}
 #sresult:not(:empty){background:var(--card);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:20px;margin-bottom:20px;overflow:hidden}
 .recentcard{overflow:hidden}
-.rflow{overflow:hidden;padding:36px 0 26px;-webkit-mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent);mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent)}
+.rflow{overflow:hidden;padding:44px 0 30px;-webkit-mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent);mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent)}
 .rtrack{display:flex;gap:14px;width:max-content;padding:0 20px;will-change:transform}
 @keyframes bob{from{transform:translateY(-4px) rotate(-.5deg)}to{transform:translateY(4px) rotate(.5deg)}}
 .rbob{animation:bob 4.2s ease-in-out infinite alternate}
@@ -1584,7 +1584,7 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 #im-t{font-size:19px;font-weight:800;margin-bottom:8px}
 #im-p{font-size:13px;line-height:1.75;color:rgba(255,255,255,.88);max-height:220px;overflow-y:auto}
 #im-a{display:inline-block;margin-top:14px;background:#fff;color:var(--ikb);font-weight:800;border-radius:980px;padding:8px 22px;font-size:13px}
-.rcard{flex:0 0 108px;position:relative;cursor:pointer;transition:transform .45s cubic-bezier(.22,.9,.32,1);transform-origin:center 78%;will-change:transform}
+.rcard{flex:0 0 108px;position:relative;cursor:pointer;transition:transform .45s cubic-bezier(.22,.9,.32,1);transform-origin:center 62%;will-change:transform}
 .rcard img{width:108px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--card2);box-shadow:0 5px 16px rgba(0,10,60,.5);display:block}
 .rname{font-size:12px;font-weight:600;margin-top:7px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ryear{font-size:11px;color:var(--sub);margin-top:1px}
@@ -1718,7 +1718,7 @@ function dockify(el){
    var d=Math.abs(mx-(r.left+r.width/2));
    var t=Math.max(0,1-d/260);        // 磁场半径260px
    t=t*t;                             // 平方衰减: 越近隆起越陡,远处几乎不动
-   var s=1+0.32*t, y=-18*t;
+   var s=1+0.22*t, y=-8*t;
    c.style.transform='scale('+s.toFixed(3)+') translateY('+y.toFixed(1)+'px)';
    c.style.zIndex=t>0.4?2:1;
   }
