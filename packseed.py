@@ -37,6 +37,8 @@ CFG = {
     "WECOM_PROXY":  os.environ.get("WECOM_PROXY", ""),     # 企微API代理,留空直连 qyapi.weixin.qq.com
     "NOTIFY_START": int(os.environ.get("NOTIFY_START", "9")),   # 免打扰:只在此小时段内推送
     "NOTIFY_END":   int(os.environ.get("NOTIFY_END", "22")),
+    "WECOM_TOKEN":  os.environ.get("WECOM_TOKEN", ""),     # 企微回调 Token(双向交互)
+    "WECOM_AESKEY": os.environ.get("WECOM_AESKEY", ""),    # 企微回调 EncodingAESKey(43位)
     # —— 整理器（识别+刮削入库）——
     "TMDB_KEY":     os.environ.get("TMDB_KEY", ""),
     "TMDB_PROXY":   os.environ.get("TMDB_PROXY", ""),      # TMDB 走代理(国内需要)，如 http://x:7890
@@ -97,37 +99,264 @@ def init_db():
     c.commit(); c.close()
 
 _WECOM = {"tok": "", "exp": 0}
-def notify(title, text=""):
-    """企业微信应用消息推送(MP同款渠道)。token缓存~110分钟;免打扰时段外静默"""
-    if not (CFG["WECOM_CORPID"] and CFG["WECOM_SECRET"] and CFG["WECOM_AGENTID"]):
-        return
-    h = time.localtime().tm_hour
-    if not (CFG["NOTIFY_START"] <= h < CFG["NOTIFY_END"]):
-        return
+_NQUEUE = []   # 未送达通知队列,后台线程重投
+def _wecom_opener():
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2   # 实测该链路 TLS1.2 成功率最高
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": CFG["TMDB_PROXY"], "https": CFG["TMDB_PROXY"]}) if CFG["TMDB_PROXY"] else urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=ctx))
+
+def _notify_try(title, text):
+    """单轮尝试(内部4次)。成功返回True。链路(dmit→腾讯跨境)天然丢包,失败进队列重投"""
     base = (CFG["WECOM_PROXY"] or "https://qyapi.weixin.qq.com").rstrip("/")
-    op = _tmdb_opener()   # 走 mihomo:qyapi 被路由到 VPS 固定出口IP(企微白名单IP);出口偶尔漂WARP会握手超时,靠重试
-    last = ""
-    for attempt in range(3):
+    op = _wecom_opener(); last = ""
+    for attempt in range(4):
         try:
             if time.time() > _WECOM["exp"] or not _WECOM["tok"]:
                 d = json.load(op.open(
-                    f"{base}/cgi-bin/gettoken?corpid={CFG['WECOM_CORPID']}&corpsecret={CFG['WECOM_SECRET']}", timeout=15))
+                    f"{base}/cgi-bin/gettoken?corpid={CFG['WECOM_CORPID']}&corpsecret={CFG['WECOM_SECRET']}", timeout=12))
                 _WECOM["tok"] = d.get("access_token", ""); _WECOM["exp"] = time.time() + 6600
             content = (title + ("\n" + text if text else "")).strip()
             body = json.dumps({"touser": "@all", "msgtype": "text", "agentid": int(CFG["WECOM_AGENTID"]),
                                "text": {"content": content}}).encode()
             r = json.load(op.open(urllib.request.Request(
                 f"{base}/cgi-bin/message/send?access_token={_WECOM['tok']}", data=body,
-                headers={"Content-Type": "application/json"}), timeout=15))
+                headers={"Content-Type": "application/json"}), timeout=12))
             if r.get("errcode") == 0:
-                return
+                return True
             last = str(r.get("errmsg", ""))[:50]
-            if r.get("errcode") in (40014, 42001, 41001):   # token失效类,刷新重试
+            if r.get("errcode") in (40014, 42001, 41001):
                 _WECOM["tok"] = ""; _WECOM["exp"] = 0
         except Exception as e:
             last = str(e)[:50]
         time.sleep(2)
-    logmsg("WARN", f"通知3次未达: {last}")
+    return False
+
+def notify(title, text=""):
+    """企业微信推送。免打扰时段外静默;当场发不出去进队列由后台必达重投"""
+    if not (CFG["WECOM_CORPID"] and CFG["WECOM_SECRET"] and CFG["WECOM_AGENTID"]):
+        return
+    h = time.localtime().tm_hour
+    if not (CFG["NOTIFY_START"] <= h < CFG["NOTIFY_END"]):
+        return
+    if not _notify_try(title, text):
+        _NQUEUE.append((title, text, time.time()))
+        logmsg("WARN", f"通知暂未达,已入队重投({len(_NQUEUE)}条待发)")
+
+def notify_worker():
+    """每2分钟重投未达通知,1小时后放弃"""
+    while True:
+        time.sleep(120)
+        try:
+            while _NQUEUE:
+                title, text, ts = _NQUEUE[0]
+                if time.time() - ts > 3600:
+                    _NQUEUE.pop(0); continue
+                if _notify_try(title, text):
+                    _NQUEUE.pop(0); logmsg("INFO", f"队列通知补投成功,剩{len(_NQUEUE)}条")
+                else:
+                    break
+        except Exception:
+            pass
+
+
+# ============ 纯标准库 AES-256-CBC(企微回调解密;S盒运行时生成,防手抄笔误) ============
+def _gmul(a, b):
+    r = 0
+    for _ in range(8):
+        if b & 1: r ^= a
+        hi = a & 0x80
+        a = (a << 1) & 0xFF
+        if hi: a ^= 0x1B
+        b >>= 1
+    return r
+
+_SBOX = [0] * 256; _ISBOX = [0] * 256
+def _init_sbox():
+    exp = [0] * 512; log = [0] * 256; x = 1
+    for i in range(255):
+        exp[i] = x; log[x] = i; x = _gmul(x, 3)
+    for i in range(255, 512): exp[i] = exp[i - 255]
+    inv = [0] * 256
+    for i in range(1, 256): inv[i] = exp[255 - log[i]]
+    for i in range(256):
+        c = inv[i]; x = c
+        for _ in range(4):
+            c = ((c << 1) | (c >> 7)) & 0xFF
+            x ^= c
+        _SBOX[i] = x ^ 0x63
+    for i, v in enumerate(_SBOX): _ISBOX[v] = i
+_init_sbox()
+
+def _kexp(key):
+    w = [list(key[4*i:4*i+4]) for i in range(8)]
+    rcon = 1
+    for i in range(8, 60):
+        t = list(w[i-1])
+        if i % 8 == 0:
+            t = t[1:] + t[:1]
+            t = [_SBOX[x] for x in t]
+            t[0] ^= rcon
+            rcon = _gmul(rcon, 2)
+        elif i % 8 == 4:
+            t = [_SBOX[x] for x in t]
+        w.append([w[i-8][j] ^ t[j] for j in range(4)])
+    return w
+
+def _ark(s, w, rnd):
+    for c in range(4):
+        for r in range(4):
+            s[r + 4*c] ^= w[4*rnd + c][r]
+
+def _shift(s):  return [s[r + 4*((c + r) % 4)] for c in range(4) for r in range(4)][0:16] if False else [s[(i % 4) + 4*(((i // 4) + (i % 4)) % 4)] for i in range(16)]
+def _ishift(s): return [s[(i % 4) + 4*(((i // 4) - (i % 4)) % 4)] for i in range(16)]
+
+def _mix(s):
+    for c in range(4):
+        a = s[4*c:4*c+4]
+        s[4*c+0] = _gmul(a[0],2) ^ _gmul(a[1],3) ^ a[2] ^ a[3]
+        s[4*c+1] = a[0] ^ _gmul(a[1],2) ^ _gmul(a[2],3) ^ a[3]
+        s[4*c+2] = a[0] ^ a[1] ^ _gmul(a[2],2) ^ _gmul(a[3],3)
+        s[4*c+3] = _gmul(a[0],3) ^ a[1] ^ a[2] ^ _gmul(a[3],2)
+
+def _imix(s):
+    for c in range(4):
+        a = s[4*c:4*c+4]
+        s[4*c+0] = _gmul(a[0],14) ^ _gmul(a[1],11) ^ _gmul(a[2],13) ^ _gmul(a[3],9)
+        s[4*c+1] = _gmul(a[0],9) ^ _gmul(a[1],14) ^ _gmul(a[2],11) ^ _gmul(a[3],13)
+        s[4*c+2] = _gmul(a[0],13) ^ _gmul(a[1],9) ^ _gmul(a[2],14) ^ _gmul(a[3],11)
+        s[4*c+3] = _gmul(a[0],11) ^ _gmul(a[1],13) ^ _gmul(a[2],9) ^ _gmul(a[3],14)
+
+def _eblk(b, w):
+    s = list(b)
+    _ark(s, w, 0)
+    for rnd in range(1, 14):
+        s = [_SBOX[x] for x in s]
+        s = _shift(s)
+        _mix(s)
+        _ark(s, w, rnd)
+    s = [_SBOX[x] for x in s]
+    s = _shift(s)
+    _ark(s, w, 14)
+    return bytes(s)
+
+def _dblk(b, w):
+    s = list(b)
+    _ark(s, w, 14)
+    for rnd in range(13, 0, -1):
+        s = _ishift(s)
+        s = [_ISBOX[x] for x in s]
+        _ark(s, w, rnd)
+        _imix(s)
+    s = _ishift(s)
+    s = [_ISBOX[x] for x in s]
+    _ark(s, w, 0)
+    return bytes(s)
+
+def _aes_cbc_dec(data, key, iv):
+    w = _kexp(key); out = b""; prev = iv
+    for i in range(0, len(data), 16):
+        blk = data[i:i+16]
+        out += bytes(x ^ y for x, y in zip(_dblk(blk, w), prev))
+        prev = blk
+    return out
+
+def _aes_cbc_enc(data, key, iv):
+    w = _kexp(key); out = b""; prev = iv
+    for i in range(0, len(data), 16):
+        blk = bytes(x ^ y for x, y in zip(data[i:i+16], prev))
+        prev = _eblk(blk, w)
+        out += prev
+    return out
+
+def aes_selftest():
+    key = bytes(range(32)); pt = bytes.fromhex("00112233445566778899aabbccddeeff")
+    w = _kexp(key); ct = _eblk(pt, w)
+    return ct.hex() == "8ea2b7ca516745bfeafc49904b496089" and _dblk(ct, w) == pt
+
+# ============ 企业微信回调(双向交互:发片名→选序号→自动下载) ============
+def _wecom_sig(ts, nonce, enc):
+    import hashlib
+    return hashlib.sha1("".join(sorted([CFG["WECOM_TOKEN"], ts, nonce, enc])).encode()).hexdigest()
+
+def wecom_decrypt(enc_b64):
+    key = base64.b64decode(CFG["WECOM_AESKEY"] + "=")
+    plain = _aes_cbc_dec(base64.b64decode(enc_b64), key, key[:16])
+    pad = plain[-1]
+    if not 1 <= pad <= 32: raise ValueError("bad padding")
+    plain = plain[:-pad]
+    ln = int.from_bytes(plain[16:20], "big")
+    return plain[20:20+ln].decode("utf-8"), plain[20+ln:].decode("utf-8", "ignore")
+
+def wecom_encrypt(msg):
+    """仅本地回环自测用(生成合法加密包)"""
+    key = base64.b64decode(CFG["WECOM_AESKEY"] + "=")
+    raw = os.urandom(16) + len(msg.encode()).to_bytes(4, "big") + msg.encode() + CFG["WECOM_CORPID"].encode()
+    pad = 32 - len(raw) % 32
+    raw += bytes([pad]) * pad
+    return base64.b64encode(_aes_cbc_enc(raw, key, key[:16])).decode()
+
+_CHAT = {"groups": [], "ts": 0, "q": ""}
+
+def _chat_label(g):
+    mt = {"tv": "剧", "movie": "影", "music": "乐", "anime": "漫"}.get(g.get("cat") or g.get("mtype"), "?")
+    yr = f"({g['year']})" if g.get("year") else ""
+    top = (g.get("results") or [{}])[0]
+    return f"{g['name']}{yr} {mt}·{len(g.get('results', []))}种·做种{top.get('seeders', 0)}"
+
+def _chat_search(q):
+    try:
+        d = search_group(q, prowlarr_search_fan(q))
+        gs = list(d.get("groups") or [])[:8]
+        if not gs:
+            for x in (d.get("other") or [])[:5]:
+                gs.append({"name": x["title"][:44], "year": "", "mtype": "?", "cat": x.get("cat",""), "results": [x]})
+        if not gs:
+            notify(f"「{q}」没搜到资源", "换个关键词试试"); return
+        _CHAT["groups"] = gs; _CHAT["ts"] = time.time(); _CHAT["q"] = q
+        lines = [f"{i+1}. {_chat_label(g)}" for i, g in enumerate(gs)]
+        notify(f"🔍「{q}」找到 {len(gs)} 个,回复数字下载:", "\n".join(lines))
+    except Exception as e:
+        notify("❌ 搜索出错", str(e)[:50])
+
+def _chat_pick(i):
+    gs = _CHAT.get("groups") or []
+    if not gs or time.time() - _CHAT.get("ts", 0) > 900:
+        notify("❓ 当前没有待选列表", "先发片名搜索(15分钟内有效)"); return
+    if not (1 <= i <= len(gs)):
+        notify(f"❓ 请回复 1~{len(gs)} 之间的数字"); return
+    g = gs[i-1]; best = (g.get("results") or [{}])[0]
+    try:
+        data = prowlarr_download(best["url"])
+        if data[:1] != b"d":
+            notify("❌ 种子拉取失败", best.get("site", "")); return
+        try: cname, _ = torrent_files(data)
+        except Exception: cname = g["name"]
+        catmap = {"music": "音乐", "anime": "动漫", "tv": "电视剧", "movie": "电影"}
+        cat = catmap.get(g.get("cat") or g.get("mtype")) or media_category(cname, None)
+        QB().add(data, category=cat, tags="packseed")
+        mates = [{"url": x["url"], "size": x.get("size", 0), "site": x.get("site", "")}
+                 for x in (g.get("results") or [])[1:40]]
+        if cname and mates:
+            c = db(); c.execute("INSERT OR REPLACE INTO pending_seed(name,data,ts) VALUES(?,?,?)",
+                                (cname, json.dumps(mates, ensure_ascii=False), int(time.time())))
+            c.commit(); c.close()
+        logmsg("INFO", f"微信点播: {g['name']} ← {best.get('site','')}")
+        notify(f"⬇️ 已开始下载 · {g['name']}",
+               f"{best.get('site','')} · {best.get('sizeh','')} · 做种{best.get('seeders',0)}\n完成后自动入库+转种+辅种,会推送通知")
+        _CHAT["groups"] = []
+    except Exception as e:
+        notify("❌ 下载失败", str(e)[:50])
+
+def wecom_on_text(text):
+    text = (text or "").strip()
+    if not text: return
+    if text.isdigit() and len(text) <= 2:
+        _chat_pick(int(text)); return
+    notify(f"🔍 收到「{text}」,全站搜索中…", "约 40~60 秒,结果稍后推送")
+    threading.Thread(target=_chat_search, args=(text,), daemon=True).start()
 
 def logmsg(level, msg):
     try:
@@ -1651,6 +1880,8 @@ class Handler(BaseHTTPRequestHandler):
         s.wfile.write("需要登录".encode())
         return False
     def do_POST(s):
+        if s.path.startswith("/api/wecom"):
+            s._wecom_post(); return
         if not s._auth_ok():
             return
         if s.path.startswith("/api/dl"):
@@ -1663,6 +1894,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         s.send_response(404); s.end_headers()
     def do_GET(s):
+        if s.path.startswith("/api/wecom"):
+            s._wecom_get(); return
         if not s._auth_ok():
             return
         if s.path.startswith("/research"):
@@ -1765,6 +1998,38 @@ class Handler(BaseHTTPRequestHandler):
     def _json(s):
         c = db(); data = {"torrents": [dict(zip(["name","query","matched","injected","status"], r)) for r in c.execute("SELECT name,query,matched,injected,status FROM torrents ORDER BY last_searched DESC LIMIT 200").fetchall()]}; c.close()
         b = json.dumps(data, ensure_ascii=False).encode(); s.send_response(200); s.send_header("Content-Type","application/json; charset=utf-8"); s.end_headers(); s.wfile.write(b)
+    def _wecom_get(s):
+        # 企微后台保存回调配置时的 URL 验证:验签→解密 echostr→回明文
+        from urllib.parse import urlparse, parse_qs
+        q = parse_qs(urlparse(s.path).query)
+        sig = q.get("msg_signature", [""])[0]; ts = q.get("timestamp", [""])[0]
+        nc = q.get("nonce", [""])[0]; ec = q.get("echostr", [""])[0]
+        try:
+            if _wecom_sig(ts, nc, ec) != sig: raise ValueError("签名不符")
+            msg, _rid = wecom_decrypt(ec)
+            b = msg.encode()
+            s.send_response(200); s.send_header("Content-Length", str(len(b))); s.end_headers(); s.wfile.write(b)
+            logmsg("INFO", "企微回调 URL 验证通过 ✅")
+        except Exception as e:
+            logmsg("WARN", f"企微URL验证失败: {str(e)[:40]}")
+            s.send_response(400); s.end_headers()
+    def _wecom_post(s):
+        # 收消息:验签→解密→文本交给会话逻辑(异步),立刻回空(躲开企微5秒超时)
+        from urllib.parse import urlparse, parse_qs
+        import xml.etree.ElementTree as ET
+        q = parse_qs(urlparse(s.path).query)
+        sig = q.get("msg_signature", [""])[0]; ts = q.get("timestamp", [""])[0]; nc = q.get("nonce", [""])[0]
+        try:
+            ln = int(s.headers.get("Content-Length", "0"))
+            enc = ET.fromstring(s.rfile.read(ln)).findtext("Encrypt") or ""
+            if _wecom_sig(ts, nc, enc) != sig: raise ValueError("签名不符")
+            xmlmsg, _rid = wecom_decrypt(enc)
+            root = ET.fromstring(xmlmsg)
+            if (root.findtext("MsgType") or "") == "text":
+                threading.Thread(target=wecom_on_text, args=(root.findtext("Content") or "",), daemon=True).start()
+        except Exception as e:
+            logmsg("WARN", f"企微消息处理失败: {str(e)[:40]}")
+        s.send_response(200); s.send_header("Content-Length", "0"); s.end_headers()
     def _send_json(s, obj):
         b = json.dumps(obj, ensure_ascii=False).encode()
         s.send_response(200); s.send_header("Content-Type","application/json; charset=utf-8"); s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b)
@@ -1893,8 +2158,11 @@ def main():
     init_db()
     org = "开" if CFG["ORGANIZE"] and CFG["TMDB_KEY"] else "关"
     logmsg("INFO", f"PackSeed 启动，监听 {CFG['PORT']}，扫描间隔 {CFG['SCAN_INTERVAL']}s，整理入库[{org}]")
+    if CFG["WECOM_TOKEN"] and CFG["WECOM_AESKEY"]:
+        logmsg("INFO", f"企微双向交互就绪(AES自检{'✅' if aes_selftest() else '❌失败!'}),回调: /api/wecom")
     threading.Thread(target=scanner, daemon=True).start()
     threading.Thread(target=qb_watcher, daemon=True).start()
+    threading.Thread(target=notify_worker, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", CFG["PORT"]), Handler).serve_forever()
 
 if __name__ == "__main__":
