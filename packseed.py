@@ -90,9 +90,15 @@ def save_settings(d):
     tmp = SETTINGS_FILE + ".tmp"
     json.dump(cur, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     os.replace(tmp, SETTINGS_FILE)
+    try: os.chmod(SETTINGS_FILE, 0o600)   # 里面有密钥,只许属主读写
+    except Exception: pass
 
 # 网页可配置字段: (分组, [(键, 标签, 提示, 是否密文)])
 SETTING_GROUPS = [
+    ("🔐 面板登录", [
+        ("AUTH_USER", "面板用户名", "两项都填才启用登录;清空即关闭。保存立即生效,浏览器会要求重新登录", False),
+        ("AUTH_PASS", "面板密码", "", True),
+    ]),
     ("⬇️ 下载与保种(必配)", [
         ("QB_URL", "qBittorrent 地址", "如 http://192.168.1.100:8080(容器同网可用 http://qbittorrent:8080)", False),
         ("QB_USER", "qb 用户名", "配了子网白名单免密可留空", False),
