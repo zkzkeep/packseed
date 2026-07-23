@@ -54,6 +54,88 @@ CFG = {
     "TR_SEED_DIR":  os.environ.get("TR_SEED_DIR", ""),    # 转种到 tr 时的数据目录(容器内)，留空=用 qb 的保存目录
 }
 
+# ============ 设置中心: /config/settings.json 覆盖环境变量,网页可改,热生效 ============
+SETTINGS_FILE = os.path.join(os.path.dirname(CFG["DB"]), "settings.json")
+
+def _coerce(k, v):
+    cur = CFG.get(k)
+    if isinstance(cur, bool): return str(v) in ("1", "true", "True", "on")
+    if isinstance(cur, int):
+        try: return int(v)
+        except Exception: return cur
+    if isinstance(cur, float):
+        try: return float(v)
+        except Exception: return cur
+    return str(v)
+
+def load_settings():
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            for k, v in json.load(open(SETTINGS_FILE, encoding="utf-8")).items():
+                if k in CFG and k in SETTABLE:
+                    CFG[k] = _coerce(k, v)
+    except Exception as e:
+        print("settings.json 加载失败:", e, flush=True)
+
+def save_settings(d):
+    cur = {}
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            cur = json.load(open(SETTINGS_FILE, encoding="utf-8"))
+    except Exception: pass
+    for k, v in d.items():
+        if k in SETTABLE and k in CFG:
+            CFG[k] = _coerce(k, v)
+            cur[k] = CFG[k]
+    tmp = SETTINGS_FILE + ".tmp"
+    json.dump(cur, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    os.replace(tmp, SETTINGS_FILE)
+
+# 网页可配置字段: (分组, [(键, 标签, 提示, 是否密文)])
+SETTING_GROUPS = [
+    ("⬇️ 下载与保种(必配)", [
+        ("QB_URL", "qBittorrent 地址", "如 http://192.168.1.100:8080(容器同网可用 http://qbittorrent:8080)", False),
+        ("QB_USER", "qb 用户名", "配了子网白名单免密可留空", False),
+        ("QB_PASS", "qb 密码", "", True),
+        ("TR_URL", "Transmission 地址", "如 http://192.168.1.100:9091", False),
+        ("TR_USER", "tr 用户名", "", False),
+        ("TR_PASS", "tr 密码", "", True),
+    ]),
+    ("🔍 站点搜索(必配)", [
+        ("PROWLARR_URL", "Prowlarr 地址", "如 http://192.168.1.100:9696", False),
+        ("PROWLARR_KEY", "Prowlarr API Key", "Prowlarr 设置→通用 里复制", True),
+    ]),
+    ("🎬 识别与刮削(推荐)", [
+        ("TMDB_KEY", "TMDB API Key", "themoviedb.org 免费申请 v3 key,识别/海报/简介全靠它", True),
+        ("TMDB_PROXY", "TMDB 代理", "国内必填,如 http://192.168.1.100:7890", False),
+        ("LRCAPI_URL", "LrcApi 地址(歌词)", "选配,如 http://192.168.1.100:28883", False),
+    ]),
+    ("📚 媒体库", [
+        ("MEDIA_TV", "剧集库路径(容器内)", "", False),
+        ("MEDIA_MOVIE", "电影库路径(容器内)", "", False),
+        ("MEDIA_ANIME", "动漫库路径(容器内)", "留空则动漫归入剧集库", False),
+        ("MEDIA_MUSIC", "音乐库路径(容器内)", "", False),
+        ("EMBY_URL", "Emby 地址", "选配,入库后通知刷新+钉身份", False),
+        ("EMBY_KEY", "Emby API Key", "Emby 控制台→高级→API 密钥", True),
+    ]),
+    ("📱 企业微信通知(选配)", [
+        ("WECOM_CORPID", "企业 ID", "", False),
+        ("WECOM_AGENTID", "应用 AgentId", "", False),
+        ("WECOM_SECRET", "应用 Secret", "", True),
+        ("WECOM_TOKEN", "回调 Token(双向交互)", "", True),
+        ("WECOM_AESKEY", "回调 EncodingAESKey", "43位", True),
+        ("WECOM_PROXY", "企微 API 代理", "可信IP方案用,留空直连", False),
+    ]),
+    ("⚙️ 其他", [
+        ("PUBLIC_URL", "本面板公网地址", "图文通知海报要用,如 https://seed.example.com", False),
+        ("MIN_SEEDERS", "搜索结果做种数门槛", "", False),
+        ("SCAN_INTERVAL", "辅种扫描间隔(秒)", "", False),
+        ("TR_BAN_SITES", "tr被ban站点黑名单", "逗号分隔,命中站点不注入", False),
+    ]),
+]
+SETTABLE = {k for _, fs in SETTING_GROUPS for k, _, _, _ in fs}
+load_settings()
+
 # ============ DB ============
 def db():
     c = sqlite3.connect(CFG["DB"], timeout=30)
@@ -1588,6 +1670,12 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 .rcard img{width:108px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--card2);box-shadow:0 5px 16px rgba(0,10,60,.5);display:block}
 .rname{font-size:12px;font-weight:600;margin-top:7px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ryear{font-size:11px;color:var(--sub);margin-top:1px}
+.sgrp{margin:14px 0 6px;font-size:14px;font-weight:700}
+.srow{display:grid;grid-template-columns:210px 1fr;gap:10px;align-items:center;margin:8px 0}
+.srow label{font-size:13px;color:rgba(255,255,255,.85)}
+.srow input{background:rgba(255,255,255,.14);border:none;color:#fff;border-radius:10px;padding:9px 13px;font-size:13px;outline:none;width:100%}
+.srow input:focus{box-shadow:0 0 0 2.5px rgba(255,255,255,.5)}
+.shint{grid-column:2;font-size:11px;color:var(--sub);margin-top:-4px}
 </style></head><body><div class=wrap>
 <h1 style="display:flex;align-items:center;gap:11px"><svg width="34" height="34" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="14" fill="#0a2fb5"/><circle cx="46" cy="17" r="7.5" fill="#FFD400"/><path d="M2 37c7-9 15-9 21 0s15 9 21 0 12-8 18-3v30H2z" fill="#ffffff" opacity="0.95"/><path d="M2 47c7-7 13-7 19 0s15 7 21 0 14-7 20-1v18H2z" fill="#CFE0FF" opacity="0.9"/></svg>观澜 <span style="font-size:15px;font-weight:600;color:rgba(255,255,255,.6);letter-spacing:.04em">Wavegazer</span></h1><div class=sub>观影观澜 · 搜索 / 下载 / 刮削 / 保种 / 辅种 —— 一个人的影音港湾</div>
 <div class=tabs>
@@ -1596,6 +1684,7 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 <a href="#media" class="tabbtn" data-t="media">📥 整理入库</a>
 <a href="#seed" class="tabbtn" data-t="seed">🌱 辅种</a>
 <a href="#logs" class="tabbtn" data-t="logs">📋 日志</a>
+<a href="#setup" class="tabbtn" data-t="setup">⚙️ 设置</a>
 </div>
 <div id=tab-dl class=tab>
 <div class=card><h2>⬇️ 下载中 <span class=mut style=font-weight:400>· qb 实时进度 · 4 秒刷新 · 下载完自动入库+转种,随后见「整理入库」</span></h2><div id=dlist style="padding:2px 16px 12px"><span class=mut>载入中…</span></div></div>
@@ -1638,6 +1727,17 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 </div>
 <div id=tab-logs class=tab>
 <div class=card><h2>最近活动</h2><table><tr><th style=width:150px>时间</th><th>消息</th></tr>{{LOGS}}</table></div>
+</div>
+<div id=tab-setup class=tab>
+<div class=card><h2>⚙️ 连接设置 <span class=mut style=font-weight:400>· 填好各服务地址,点测试验证,保存即热生效(无需重启)</span></h2>
+<div id=setform style="padding:4px 20px 16px"><span class=mut>加载中…</span></div>
+<div style="padding:0 20px 20px;display:flex;gap:12px;align-items:center">
+<button class=dlbtn style="padding:11px 34px;font-size:14px" onclick="saveSettings(this)">💾 保存全部</button>
+<button class=dlbtn style="padding:11px 26px;font-size:14px;background:rgba(255,255,255,.2);color:#fff" onclick="testAll(this)">🔌 测试全部连接</button>
+<span id=set-msg class=mut></span>
+</div>
+<div id=testout style="padding:0 20px 16px;font-size:13px;line-height:2"></div>
+</div>
 </div>
 <div class=sub style=text-align:center>观澜 Wavegazer · 一个人的影音港湾 · MIT 开源</div>
 </div><div id=toast></div>
@@ -1778,6 +1878,51 @@ function pollDash(){
  }).catch(()=>{});
 }
 pollDash();setInterval(pollDash,5000);
+function loadSettings(){
+ fetch('/api/settings').then(r=>r.json()).then(function(d){
+  var f=document.getElementById('setform');if(!f||!d.ok)return;
+  f.innerHTML='';var unset=0;
+  d.groups.forEach(function(g){
+   var h=document.createElement('div');h.className='sgrp';h.textContent=g.name;f.appendChild(h);
+   g.fields.forEach(function(x){
+    var row=document.createElement('div');row.className='srow';
+    var lb=document.createElement('label');lb.textContent=x.label;row.appendChild(lb);
+    var inp=document.createElement('input');inp.id='set-'+x.key;inp.value=x.value;
+    if(x.secret)inp.type='password';
+    if(x.hint)inp.placeholder=x.hint;
+    row.appendChild(inp);f.appendChild(row);
+    if(x.hint){var ht=document.createElement('div');ht.className='shint';ht.textContent=x.hint;/*占位提示已够,略*/}
+    if(!x.value&&(x.key=='PROWLARR_KEY'||x.key=='TR_URL'||x.key=='QB_URL'))unset++;
+   });
+  });
+  if(unset>0){var b=document.querySelector('.tabbtn[data-t="setup"]');if(b)b.textContent='⚙️ 设置 ❗';}
+ });
+}
+loadSettings();
+function saveSettings(btn){
+ btn.disabled=true;var d={};
+ document.querySelectorAll('#setform input').forEach(function(i){d[i.id.slice(4)]=i.value;});
+ fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)})
+ .then(r=>r.json()).then(function(r){
+  btn.disabled=false;
+  document.getElementById('set-msg').textContent=r.ok?'✅ 已保存并热生效':'❌ '+(r.err||'保存失败');
+  setTimeout(()=>{document.getElementById('set-msg').textContent='';},4000);
+ }).catch(()=>{btn.disabled=false;});
+}
+function testAll(btn){
+ btn.disabled=true;
+ var out=document.getElementById('testout');out.innerHTML='';
+ var svcs=[['tr','Transmission'],['qb','qBittorrent'],['prowlarr','Prowlarr'],['tmdb','TMDB'],['emby','Emby'],['lrcapi','LrcApi'],['wecom','企业微信']];
+ var done=0;
+ svcs.forEach(function(sv){
+  var line=document.createElement('div');line.textContent='⏳ '+sv[1]+' 测试中…';out.appendChild(line);
+  fetch('/api/test?svc='+sv[0]).then(r=>r.json()).then(function(d){
+   line.textContent=(d.ok?'✅ ':'❌ ')+sv[1]+': '+d.msg;
+   line.style.color=d.ok?'var(--ok)':'var(--err)';
+   if(++done==svcs.length)btn.disabled=false;
+  }).catch(function(){line.textContent='❌ '+sv[1]+': 请求失败';line.style.color='var(--err)';if(++done==svcs.length)btn.disabled=false;});
+ });
+}
 function research(h,el){
  var inp=el.parentNode.querySelector('input');var q=inp.value.trim();
  if(!q){inp.focus();return;}
@@ -2156,6 +2301,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = {}
             s._dl_run((body.get("url") or "").strip(), (body.get("cat") or "").strip(), body.get("mates") or [])
             return
+        if s.path.startswith("/api/settings"):
+            s._settings_post(); return
         s.send_response(404); s.end_headers()
     def do_GET(s):
         if s.path.startswith("/api/wecom"):
@@ -2191,6 +2338,10 @@ class Handler(BaseHTTPRequestHandler):
             s._poster(); return
         if s.path.startswith("/api/overview"):
             s._overview(); return
+        if s.path.startswith("/api/settings"):
+            s._settings_get(); return
+        if s.path.startswith("/api/test"):
+            s._svc_test(); return
         if s.path.startswith("/api/dashboard"):
             s._dashboard(); return
         if s.path.startswith("/api/downloads"):
@@ -2401,6 +2552,57 @@ class Handler(BaseHTTPRequestHandler):
         if len(_OVCACHE) > 500: _OVCACHE.clear()
         _OVCACHE[key] = (resp, time.time())
         s._send_json(resp)
+    def _settings_get(s):
+        groups = []
+        for gname, fields in SETTING_GROUPS:
+            groups.append({"name": gname, "fields": [
+                {"key": k, "label": lb, "hint": h, "secret": sec, "value": str(CFG.get(k, ""))}
+                for k, lb, h, sec in fields]})
+        s._send_json({"ok": True, "groups": groups})
+    def _settings_post(s):
+        try:
+            ln = int(s.headers.get("Content-Length", "0"))
+            body = json.loads(s.rfile.read(ln) or b"{}")
+            save_settings({k: v for k, v in body.items() if isinstance(v, (str, int, float))})
+            logmsg("INFO", f"设置已更新({len(body)}项),热生效")
+            s._send_json({"ok": True})
+        except Exception as e:
+            s._send_json({"ok": False, "err": str(e)[:80]})
+    def _svc_test(s):
+        from urllib.parse import urlparse, parse_qs
+        svc = (parse_qs(urlparse(s.path).query).get("svc", [""])[0])
+        try:
+            if svc == "tr":
+                v = TR().call("session-get", {})["arguments"].get("version", "?")
+                s._send_json({"ok": True, "msg": f"Transmission {v}"})
+            elif svc == "qb":
+                v = QB()._get("/api/v2/app/version").decode("utf-8", "ignore")
+                s._send_json({"ok": True, "msg": f"qBittorrent {v}"})
+            elif svc == "prowlarr":
+                req = urllib.request.Request(CFG["PROWLARR_URL"].rstrip("/") + "/api/v1/indexer",
+                                             headers={"X-Api-Key": CFG["PROWLARR_KEY"]})
+                n = len(json.load(urllib.request.urlopen(req, timeout=10)))
+                s._send_json({"ok": True, "msg": f"Prowlarr 连通,{n} 个索引器"})
+            elif svc == "tmdb":
+                d = _tmdb_call("/configuration")
+                s._send_json({"ok": bool(d.get("images")), "msg": "TMDB 连通(代理OK)" if d.get("images") else "TMDB 响应异常"})
+            elif svc == "emby":
+                d = json.load(urllib.request.urlopen(
+                    CFG["EMBY_URL"].rstrip("/") + "/emby/System/Info?api_key=" + CFG["EMBY_KEY"], timeout=10))
+                s._send_json({"ok": True, "msg": f"Emby {d.get('Version','?')}"})
+            elif svc == "lrcapi":
+                urllib.request.urlopen(CFG["LRCAPI_URL"].rstrip("/") + "/lyrics?title=test", timeout=8).read()
+                s._send_json({"ok": True, "msg": "LrcApi 连通"})
+            elif svc == "wecom":
+                base = (CFG["WECOM_PROXY"] or "https://qyapi.weixin.qq.com").rstrip("/")
+                d = json.load(_wecom_opener().open(
+                    f"{base}/cgi-bin/gettoken?corpid={CFG['WECOM_CORPID']}&corpsecret={CFG['WECOM_SECRET']}", timeout=12))
+                ok = d.get("errcode") == 0
+                s._send_json({"ok": ok, "msg": "企微凭证有效" if ok else f"企微: {d.get('errmsg','')[:40]}"})
+            else:
+                s._send_json({"ok": False, "msg": "未知服务"})
+        except Exception as e:
+            s._send_json({"ok": False, "msg": str(e)[:70]})
     def _dashboard(s):
         out = {}
         try:

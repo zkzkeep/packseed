@@ -46,43 +46,48 @@ cross-seed 依赖 release 命名规范来匹配。遇到 PT 站常见的中文�
 
 ## 快速开始
 
-### Docker Compose（推荐）
+### 你需要准备的邻居们
+
+| 服务 | 必要性 | 作用 |
+|---|---|---|
+| [qBittorrent](https://www.qbittorrent.org/) | **必装** | 下载器 |
+| [Transmission](https://transmissionbt.com/) | **必装** | 保种做种(建议 3.00,PT 全站白名单) |
+| [Prowlarr](https://github.com/Prowlarr/Prowlarr) | **必装** | 站点聚合搜索(把你的 PT 站都加进去) |
+| TMDB API Key | 推荐 | 识别/海报/简介(themoviedb.org 免费申请,国内需配代理) |
+| [Emby](https://emby.media/)/Jellyfin | 推荐 | 播放媒体库 |
+| [LrcApi](https://github.com/HisAtri/LrcApi) | 选配 | 音乐歌词 |
+| 企业微信自建应用 | 选配 | 通知+微信点播 |
+
+### 起观澜
 
 ```yaml
 services:
-  packseed:
+  guanlan:
     image: python:3.11-slim
-    container_name: packseed
+    container_name: guanlan
     ports:
       - "2470:2470"
     volumes:
-      - ./packseed:/config          # packseed.py 和数据库放这
-      - /path/to/your/data:/data     # 和下载器共享的数据目录(硬链接需同一文件系统)
+      - ./guanlan:/config              # packseed.py、数据库、settings.json 都在这
+      - /path/to/your/data:/data       # 与下载器共享的数据目录(硬链接需同一文件系统)
     environment:
       - TZ=Asia/Shanghai
-      - TR_URL=http://transmission:9091
-      - TR_USER=admin
-      - TR_PASS=your_tr_password
-      - PROWLARR_URL=http://prowlarr:9696
-      - PROWLARR_KEY=your_prowlarr_apikey
-      - DATA_LINK_DIR=/data/cross-seed-links
-      - SCAN_INTERVAL=1800
-      # 下面两个都设了才启用登录，留空则免登录
+      # 可选:面板登录(都设置才启用)
       - PACKSEED_USER=admin
-      - PACKSEED_PASS=your_web_password
+      - PACKSEED_PASS=your_password
     command: python /config/packseed.py
     restart: unless-stopped
 ```
 
-把 `packseed.py` 放进挂载的 `./packseed` 目录，`docker compose up -d`，浏览器打开 `http://<host>:2470`。
+把 `packseed.py` 放进 `./guanlan`,`docker compose up -d`,浏览器打开 `http://<host>:2470`。
 
-### 直接运行
+### 三分钟接线
 
-```bash
-TR_URL=http://localhost:9091 TR_USER=admin TR_PASS=xxx \
-PROWLARR_URL=http://localhost:9696 PROWLARR_KEY=xxx \
-python3 packseed.py
-```
+打开 **⚙️ 设置** 标签页 → 填入各服务的地址和密钥 → 点 **🔌 测试全部连接** 逐项验证 → **💾 保存**(热生效,无需重启)。
+
+> 地址怎么填?同一台机器上的服务用宿主机内网 IP(如 `http://192.168.1.100:8080`);
+> 同一个 compose 里的服务可以用服务名(如 `http://qbittorrent:8080`,host 网络的服务除外)。
+> 配置保存在 `/config/settings.json`,优先级高于环境变量。
 
 ## 配置项
 
