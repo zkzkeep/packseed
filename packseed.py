@@ -816,11 +816,16 @@ a{color:var(--acc)}
 .pbar{height:6px;background:#20232e;border-radius:4px;margin-top:7px;overflow:hidden}
 .pbar i{display:block;height:100%;background:var(--acc);border-radius:4px;transition:width .5s}
 .pbar i.full{background:var(--ok)}
+.dcard{display:flex;gap:14px;padding:12px 0;border-bottom:1px solid var(--line);align-items:flex-start}
+.dcard:last-child{border-bottom:none}
+.dpos{width:58px;height:87px;object-fit:cover;border-radius:8px;background:#20232e;flex-shrink:0}
+.dph{width:58px;height:87px;border-radius:8px;background:#20232e;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:24px}
+.dtt{font-size:14px;font-weight:700}.dtt .mut{font-weight:400;font-size:12px}
 </style></head><body><div class=wrap>
 <h1>🌱 PackSeed</h1><div class=sub>搜索下载 · 刮削入库 · 转种保种 · 全站辅种 —— 全自动</div>
 <div class=tabs>
 <a href="#search" class="tabbtn" data-t="search">🔍 搜索下载</a>
-<a href="#dl" class="tabbtn" data-t="dl">⬇️ 下载</a>
+<a href="#dl" class="tabbtn" data-t="dl">⬇️ 下载管理</a>
 <a href="#media" class="tabbtn" data-t="media">📥 整理入库</a>
 <a href="#seed" class="tabbtn" data-t="seed">🌱 辅种</a>
 <a href="#logs" class="tabbtn" data-t="logs">📋 日志</a>
@@ -879,15 +884,19 @@ function pollDl(){
   else{
    el.innerHTML='';
    dl.forEach(function(t){
-    var row=document.createElement('div');row.style.cssText='padding:9px 0;border-bottom:1px solid var(--line)';
-    var l1=document.createElement('div');l1.style.cssText='display:flex;justify-content:space-between;gap:12px;font-size:13px;align-items:baseline';
-    var n=document.createElement('div');n.className='sname';n.style.maxWidth='620px';n.title=t.name;n.textContent=t.name;
-    var i=document.createElement('div');i.className='mut';i.style.whiteSpace='nowrap';
-    i.textContent=(SM[t.state]||t.state)+' · '+t.sizeh+' · '+t.speed+(t.eta?' · 剩'+t.eta:'')+' · 做种'+t.seeds+' · '+t.progress+'%';
-    l1.appendChild(n);l1.appendChild(i);
+    var row=document.createElement('div');row.className='dcard';
+    if(t.poster){var im=document.createElement('img');im.className='dpos';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(t.poster);row.appendChild(im);}
+    else{var ph=document.createElement('div');ph.className='dph';ph.textContent='⬇️';row.appendChild(ph);}
+    var col=document.createElement('div');col.style.cssText='flex:1;min-width:0';
+    var tt=document.createElement('div');tt.className='dtt';
+    tt.textContent=t.tmdb?(t.tmdb+(t.year?' ('+t.year+')':'')):t.name.slice(0,50);
+    if(t.tmdb){var sm=document.createElement('span');sm.className='mut';sm.textContent='  '+t.name.slice(0,56);tt.appendChild(sm);}
     var pb=document.createElement('div');pb.className='pbar';var pi=document.createElement('i');
     pi.style.width=t.progress+'%';if(t.progress>=100)pi.className='full';pb.appendChild(pi);
-    row.appendChild(l1);row.appendChild(pb);el.appendChild(row);
+    var i=document.createElement('div');i.className='mut';i.style.cssText='font-size:12px;margin-top:6px';
+    i.textContent=(SM[t.state]||t.state)+' · '+t.sizeh+' · '+t.speed+(t.eta?' · 剩'+t.eta:'')+' · 做种'+t.seeds+' · '+t.progress+'%';
+    col.appendChild(tt);col.appendChild(pb);col.appendChild(i);
+    row.appendChild(col);el.appendChild(row);
    });
   }
   var dd=document.getElementById('ddone');if(!dd)return;
@@ -1034,6 +1043,20 @@ th{color:var(--sub);font-weight:600;border-top:none}.mut{color:var(--sub)}
 <table><tr><th>站点</th><th>方式</th><th>结果</th></tr>{{MROWS}}</table></div>
 <div class=mut style=text-align:center;font-size:12px>PackSeed · 自制辅种</div>
 </div></body></html>"""
+
+_DLMETA = {}
+def _dlmeta(h, name):
+    """下载页海报：每个种子只做一次 TMDB 识别，缓存住(轮询4秒一次,不能每次都查)"""
+    m = _DLMETA.get(h)
+    if m is None:
+        try: mm = tmdb_match(name)
+        except Exception: mm = None
+        if mm and mm.get("conf") == "low": mm = None    # 低置信别放错海报误导
+        m = {"tmdb": (mm or {}).get("tmdb_name","") or "", "year": (mm or {}).get("year","") or "",
+             "poster": (mm or {}).get("poster","") or ""}
+        if len(_DLMETA) > 500: _DLMETA.clear()
+        _DLMETA[h] = m
+    return m
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(s, *a): pass
@@ -1235,9 +1258,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif eta >= 3600: etas = f"{eta//3600}时{eta%3600//60}分"
                 elif eta >= 60: etas = f"{eta//60}分{eta%60}秒"
                 else: etas = f"{eta}秒"
+                meta = _dlmeta(t.get("hash",""), t.get("name",""))
                 out["dl"].append({"name": t.get("name",""), "progress": round(prog*100, 1),
                                   "sizeh": human_size(t.get("size",0)), "speed": human_size(t.get("dlspeed",0))+"/s",
-                                  "eta": etas, "state": t.get("state",""), "seeds": t.get("num_seeds",0)})
+                                  "eta": etas, "state": t.get("state",""), "seeds": t.get("num_seeds",0),
+                                  "tmdb": meta["tmdb"], "year": meta["year"], "poster": meta["poster"]})
         except Exception as e:
             out["err"] = str(e)[:60]
         c = db()
