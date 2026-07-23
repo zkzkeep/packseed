@@ -1537,8 +1537,9 @@ a{color:var(--accL);text-decoration:none}
 .fpill.on{background:#fff;color:var(--ikb)}
 .wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(136px,1fr));gap:18px;padding:16px 20px}
 .pcard{cursor:pointer;border-radius:14px;transition:.22s cubic-bezier(.2,.8,.3,1)}
-.wall:hover .pcard{opacity:.7}
-.wall .pcard:hover{opacity:1;transform:translateY(-6px) scale(1.05);z-index:2}
+.pcard{transition:transform .45s cubic-bezier(.22,.9,.32,1),opacity .45s ease}
+.wall:hover .pcard{opacity:.82}
+.wall .pcard:hover{opacity:1;transform:translateY(-5px) scale(1.045);z-index:2;position:relative}
 .pcard.sel .pw,.pcard.sel .ph{box-shadow:0 0 0 3px #fff,0 12px 32px rgba(0,10,60,.6)}
 .pcard .pw{width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:12px;background:var(--card2);display:block;transition:.22s;box-shadow:0 6px 18px rgba(0,10,60,.45)}
 .pcard:hover .pw{box-shadow:0 14px 36px rgba(0,10,60,.65)}
@@ -1564,11 +1565,8 @@ background-color:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px soli
 .hero .fbar{justify-content:center;padding:18px 0 0}
 #sresult:not(:empty){background:var(--card);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:20px;margin-bottom:20px;overflow:hidden}
 .rstrip{display:flex;gap:14px;padding:22px 20px 26px;overflow-x:auto;scrollbar-width:thin}
-.rcard{flex:0 0 108px;transition:transform .28s cubic-bezier(.2,.8,.3,1),opacity .28s ease;transform-origin:center 70%}
-.rstrip:hover .rcard{opacity:.62;transform:scale(.96)}
-.rstrip .rcard:hover{opacity:1;transform:scale(1.16) translateY(-8px);z-index:2;position:relative}
-.rcard img{width:108px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--card2);box-shadow:0 5px 16px rgba(0,10,60,.5);display:block;transition:box-shadow .28s ease}
-.rstrip .rcard:hover img{box-shadow:0 16px 40px rgba(0,10,60,.7)}
+.rcard{flex:0 0 108px;position:relative;transition:transform .45s cubic-bezier(.22,.9,.32,1);transform-origin:center 78%;will-change:transform}
+.rcard img{width:108px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--card2);box-shadow:0 5px 16px rgba(0,10,60,.5);display:block}
 .rname{font-size:12px;font-weight:600;margin-top:7px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ryear{font-size:11px;color:var(--sub);margin-top:1px}
 </style></head><body><div class=wrap>
@@ -1682,6 +1680,29 @@ function pollDl(){
 showTab((location.hash||'#search').slice(1));
 window.addEventListener('hashchange',function(){showTab(location.hash.slice(1)||'search');});
 var _t=setTimeout(()=>location.reload(),15000);
+function dockify(el){
+ if(!el)return;
+ var raf=null,mx=null;
+ function apply(){
+  raf=null;
+  var cards=el.children;
+  for(var i=0;i<cards.length;i++){
+   var c=cards[i],r=c.getBoundingClientRect();
+   var d=Math.abs(mx-(r.left+r.width/2));
+   var t=Math.max(0,1-d/230);        // 磁场半径230px
+   t=t*t;                             // 平方衰减: 越近隆起越陡,远处几乎不动
+   var s=1+0.17*t, y=-9*t;
+   c.style.transform='scale('+s.toFixed(3)+') translateY('+y.toFixed(1)+'px)';
+   c.style.zIndex=t>0.4?2:1;
+  }
+ }
+ el.addEventListener('mousemove',function(e){mx=e.clientX;if(!raf)raf=requestAnimationFrame(apply);});
+ el.addEventListener('mouseleave',function(){
+  var cards=el.children;
+  for(var i=0;i<cards.length;i++){cards[i].style.transform='';cards[i].style.zIndex='';}
+ });
+}
+dockify(document.querySelector('.rstrip'));
 function research(h,el){
  var inp=el.parentNode.querySelector('input');var q=inp.value.trim();
  if(!q){inp.focus();return;}
