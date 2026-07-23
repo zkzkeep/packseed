@@ -1940,7 +1940,11 @@ function ksRender(){
  h+='</table><div class=mut style=margin-top:6px>显示 '+Math.min(fs.length,400)+' / 符合 '+fs.length+' / 已拉 '+_ksItems.length+' 条 · 禁转种可保种但转种助手会拦</div>';
  el.innerHTML=h;
 }
-function ksAll(){document.querySelectorAll('.kscb').forEach(c=>c.checked=true);}
+function ksAll(){
+ var cbs=document.querySelectorAll('.kscb');
+ var allOn=[...cbs].every(c=>c.checked);   // 全勾着=再点一次取消全选
+ cbs.forEach(c=>c.checked=!allOn);
+}
 function ksPush(btn){
  var picks=[];
  document.querySelectorAll('.kscb:checked').forEach(function(c){var x=_ksItems[parseInt(c.dataset.i)];if(x)picks.push({name:x.name,size:x.size,url:x.url});});
