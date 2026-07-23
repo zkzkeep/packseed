@@ -1580,7 +1580,7 @@ background-color:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px soli
 #im-t{font-size:19px;font-weight:800;margin-bottom:8px}
 #im-p{font-size:13px;line-height:1.75;color:rgba(255,255,255,.88);max-height:220px;overflow-y:auto}
 #im-a{display:inline-block;margin-top:14px;background:#fff;color:var(--ikb);font-weight:800;border-radius:980px;padding:8px 22px;font-size:13px}
-.rcard{flex:0 0 108px;position:relative;transition:transform .45s cubic-bezier(.22,.9,.32,1);transform-origin:center 78%;will-change:transform}
+.rcard{flex:0 0 108px;position:relative;cursor:pointer;transition:transform .45s cubic-bezier(.22,.9,.32,1);transform-origin:center 78%;will-change:transform}
 .rcard img{width:108px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--card2);box-shadow:0 5px 16px rgba(0,10,60,.5);display:block}
 .rname{font-size:12px;font-weight:600;margin-top:7px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ryear{font-size:11px;color:var(--sub);margin-top:1px}
@@ -1744,14 +1744,17 @@ function dockify(el){
  var el=document.getElementById('rtrack');if(!el)return;
  el.addEventListener('click',function(e){
   var c=e.target.closest('.rcard');if(!c||!c.dataset.tid||c.dataset.tid=='0')return;
+  var img=c.querySelector('img'),nm=c.querySelector('.rname'),yr=c.querySelector('.ryear');
+  document.getElementById('im-img').src=img?img.src:'';
+  document.getElementById('im-t').textContent=(nm?nm.textContent:'')+(yr&&yr.textContent?' ('+yr.textContent+')':'');
+  document.getElementById('im-p').textContent='简介加载中…';
+  var a=document.getElementById('im-a');a.href='{{EMBYPUB}}';
+  document.getElementById('im-ov').classList.add('show');       // 秒开,不等网络
   fetch('/api/overview?mt='+c.dataset.mt+'&id='+c.dataset.tid).then(r=>r.json()).then(function(d){
-   if(!d.ok)return;
-   document.getElementById('im-img').src=d.poster?('/api/poster?p='+encodeURIComponent(d.poster)):'';
-   document.getElementById('im-t').textContent=d.name+(d.year?' ('+d.year+')':'');
+   if(!d.ok){document.getElementById('im-p').textContent='简介获取失败';return;}
    document.getElementById('im-p').textContent=d.overview;
-   document.getElementById('im-a').href='{{EMBYPUB}}/web/index.html#!/search?query='+encodeURIComponent(d.name);
-   document.getElementById('im-ov').classList.add('show');
-  });
+   if(d.emby)a.href='{{EMBYPUB}}'+d.emby;                        // 直达该剧页面
+  }).catch(function(){document.getElementById('im-p').textContent='简介获取失败';});
  });
 })();
 function fmtB(n,s){n=n||0;var u=['B','KB','MB','GB','TB'];var i=0;while(n>=1024&&i<4){n/=1024;i++}return n.toFixed(n>=100||i==0?0:1)+u[i]+(s||'');}
@@ -1922,6 +1925,8 @@ td{text-align:left;padding:9px 6px;border-top:1px solid var(--line);font-size:13
 </div></body></html>"""
 
 _DASH_MEDIA = {}
+_OVCACHE = {}
+_EMBY_SID = ""
 _DLMETA = {}
 def _dlmeta(h, name):
     """下载页海报：每个种子只做一次 TMDB 识别，缓存住(轮询4秒一次,不能每次都查)"""
@@ -2351,11 +2356,32 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(urlparse(s.path).query)
         mt = (qs.get("mt", ["tv"])[0]) or "tv"; tid = (qs.get("id", ["0"])[0])
         if not tid.isdigit() or tid == "0": s._send_json({"ok": False}); return
+        key = (mt, tid)
+        hit = _OVCACHE.get(key)
+        if hit and time.time() - hit[1] < 86400:
+            s._send_json(hit[0]); return
         d = tmdb_details("movie" if mt == "movie" else "tv", int(tid))
-        s._send_json({"ok": True, "name": d.get("name") or d.get("title") or "",
-                      "year": (d.get("first_air_date") or d.get("release_date") or "")[:4],
-                      "overview": d.get("overview") or "暂无简介",
-                      "poster": d.get("poster_path") or ""})
+        name = d.get("name") or d.get("title") or ""
+        emby = ""
+        try:
+            if CFG["EMBY_URL"] and CFG["EMBY_KEY"] and name:
+                E = CFG["EMBY_URL"].rstrip("/") + "/emby"; k = CFG["EMBY_KEY"]
+                global _EMBY_SID
+                if not _EMBY_SID:
+                    _EMBY_SID = json.load(urllib.request.urlopen(E + "/System/Info?api_key=" + k, timeout=8)).get("Id", "")
+                it = json.load(urllib.request.urlopen(
+                    E + "/Items?IncludeItemTypes=Series,Movie&Recursive=true&SearchTerm="
+                    + urllib.parse.quote(name) + "&Limit=1&api_key=" + k, timeout=8)).get("Items") or []
+                if it:
+                    emby = f"/web/index.html#!/item?id={it[0]['Id']}&serverId={_EMBY_SID}"
+        except Exception: pass
+        resp = {"ok": True, "name": name,
+                "year": (d.get("first_air_date") or d.get("release_date") or "")[:4],
+                "overview": d.get("overview") or "暂无简介",
+                "poster": d.get("poster_path") or "", "emby": emby}
+        if len(_OVCACHE) > 500: _OVCACHE.clear()
+        _OVCACHE[key] = (resp, time.time())
+        s._send_json(resp)
     def _dashboard(s):
         out = {}
         try:
