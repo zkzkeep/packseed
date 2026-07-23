@@ -322,13 +322,28 @@ def wecom_encrypt(msg):
     raw += bytes([pad]) * pad
     return base64.b64encode(_aes_cbc_enc(raw, key, key[:16])).decode()
 
-_CHAT = {"groups": [], "ts": 0, "q": ""}
+_CHAT = {"stage": "idle", "groups": [], "gi": 0, "ts": 0, "q": "", "last": None}
 
 def _chat_label(g):
     mt = {"tv": "剧", "movie": "影", "music": "乐", "anime": "漫"}.get(g.get("cat") or g.get("mtype"), "?")
     yr = f"({g['year']})" if g.get("year") else ""
     top = (g.get("results") or [{}])[0]
     return f"{g['name']}{yr} {mt}·{len(g.get('results', []))}种·做种{top.get('seeders', 0)}"
+
+def _chat_send_groups():
+    gs = _CHAT["groups"]; q = _CHAT["q"]
+    arts = []
+    for i, g in enumerate(gs):
+        pic = poster_url(g.get("posterurl") or g.get("poster") or "")
+        top = (g.get("results") or [{}])[0]
+        mt = {"tv": "剧集", "movie": "电影", "music": "音乐", "anime": "动漫"}.get(g.get("cat") or g.get("mtype"), "其他")
+        yr = f" ({g['year']})" if g.get("year") else ""
+        arts.append({"title": f"{i+1}. {g['name']}{yr}",
+                     "description": f"{mt} · {len(g.get('results', []))}个种 · 最高做种{top.get('seeders', 0)}",
+                     "url": CFG["PUBLIC_URL"] or "https://seed.leesy.cc", "picurl": pic})
+    notify_news(arts)
+    notify(f"🔍「{q}」共 {len(gs)} 个", "回复数字选片(15分钟有效),0 取消")
+    _CHAT["stage"] = "groups"; _CHAT["ts"] = time.time()
 
 def _chat_search(q):
     try:
@@ -339,56 +354,94 @@ def _chat_search(q):
                 gs.append({"name": x["title"][:44], "year": "", "mtype": "?", "cat": x.get("cat",""), "results": [x]})
         if not gs:
             notify(f"「{q}」没搜到资源", "换个关键词试试"); return
-        _CHAT["groups"] = gs; _CHAT["ts"] = time.time(); _CHAT["q"] = q
-        arts = []
-        for i, g in enumerate(gs):
-            pic = poster_url(g.get("posterurl") or g.get("poster") or "")
-            top = (g.get("results") or [{}])[0]
-            mt = {"tv": "剧集", "movie": "电影", "music": "音乐", "anime": "动漫"}.get(g.get("cat") or g.get("mtype"), "其他")
-            yr = f" ({g['year']})" if g.get("year") else ""
-            arts.append({"title": f"{i+1}. {g['name']}{yr}",
-                         "description": f"{mt} · {len(g.get('results', []))}个种 · 最高做种{top.get('seeders', 0)} · 回复 {i+1} 下载",
-                         "url": CFG["PUBLIC_URL"] or "https://seed.leesy.cc",
-                         "picurl": pic})
-        notify_news(arts)
-        notify(f"🔍「{q}」共 {len(gs)} 个结果", "回复对应数字开始下载(15分钟内有效)")
+        _CHAT["groups"] = gs; _CHAT["q"] = q
+        _chat_send_groups()
     except Exception as e:
         notify("❌ 搜索出错", str(e)[:50])
 
-def _chat_pick(i):
+def _chat_pick_group(i):
     gs = _CHAT.get("groups") or []
     if not gs or time.time() - _CHAT.get("ts", 0) > 900:
-        notify("❓ 当前没有待选列表", "先发片名搜索(15分钟内有效)"); return
+        notify("❓ 没有待选片单", "先发片名搜索"); return
     if not (1 <= i <= len(gs)):
-        notify(f"❓ 请回复 1~{len(gs)} 之间的数字"); return
-    g = gs[i-1]; best = (g.get("results") or [{}])[0]
+        notify(f"❓ 请回复 1~{len(gs)}"); return
+    _CHAT["gi"] = i - 1; g = gs[i-1]
+    rs = (g.get("results") or [])[:8]
+    lines = [f"{j+1}. {x.get('site','?')} · {x.get('sizeh','')} · 做种{x.get('seeders',0)}" for j, x in enumerate(rs)]
+    notify(f"🎯 已选«{g['name']}»,挑个站的种子:", "\n".join(lines) + "\n\n回复数字下载 · 0 返回片单\n(1 通常就是最优:做种最多)")
+    _CHAT["stage"] = "torrents"; _CHAT["ts"] = time.time()
+
+def _chat_pick_torrent(j):
+    gs = _CHAT.get("groups") or []
+    if _CHAT.get("stage") != "torrents" or not gs or time.time() - _CHAT.get("ts", 0) > 900:
+        notify("❓ 没有待选站点列表", "先发片名→选片"); return
+    g = gs[_CHAT["gi"]]; rs = (g.get("results") or [])[:8]
+    if not (1 <= j <= len(rs)):
+        notify(f"❓ 请回复 1~{len(rs)},或 0 返回"); return
+    pick = rs[j-1]
     try:
-        data = prowlarr_download(best["url"])
+        data = prowlarr_download(pick["url"])
         if data[:1] != b"d":
-            notify("❌ 种子拉取失败", best.get("site", "")); return
+            notify("❌ 种子拉取失败", pick.get("site", "")); return
         try: cname, _ = torrent_files(data)
         except Exception: cname = g["name"]
+        try: ih = torrent_infohash(data)
+        except Exception: ih = ""
         catmap = {"music": "音乐", "anime": "动漫", "tv": "电视剧", "movie": "电影"}
         cat = catmap.get(g.get("cat") or g.get("mtype")) or media_category(cname, None)
         QB().add(data, category=cat, tags="packseed")
         mates = [{"url": x["url"], "size": x.get("size", 0), "site": x.get("site", "")}
-                 for x in (g.get("results") or [])[1:40]]
+                 for x in (g.get("results") or []) if x.get("url") != pick.get("url")][:40]
         if cname and mates:
             c = db(); c.execute("INSERT OR REPLACE INTO pending_seed(name,data,ts) VALUES(?,?,?)",
                                 (cname, json.dumps(mates, ensure_ascii=False), int(time.time())))
             c.commit(); c.close()
-        logmsg("INFO", f"微信点播: {g['name']} ← {best.get('site','')}")
+        _CHAT["last"] = {"hash": ih, "name": g["name"], "cname": cname, "ts": time.time()}
+        _CHAT["stage"] = "idle"; _CHAT["groups"] = []
+        logmsg("INFO", f"微信点播: {g['name']} ← {pick.get('site','')}")
         notify(f"⬇️ 已开始下载 · {g['name']}",
-               f"{best.get('site','')} · {best.get('sizeh','')} · 做种{best.get('seeders',0)}\n完成后自动入库+转种+辅种,会推送通知")
-        _CHAT["groups"] = []
+               f"{pick.get('site','')} · {pick.get('sizeh','')} · 做种{pick.get('seeders',0)}\n"
+               f"完成后自动入库+转种+辅种\n选错了?回复「撤回」取消并删除")
     except Exception as e:
         notify("❌ 下载失败", str(e)[:50])
+
+def _chat_undo():
+    last = _CHAT.get("last")
+    if not last or time.time() - last.get("ts", 0) > 1800:
+        notify("❓ 没有可撤回的下载", "撤回窗口为下载后30分钟内"); return
+    try:
+        qb = QB()
+        t = next((x for x in qb.torrents() if last.get("hash") and x.get("hash","").lower() == last["hash"].lower()), None)
+        if not t and last.get("cname"):
+            t = next((x for x in qb.torrents() if x.get("name") == last["cname"]), None)
+        if not t:
+            notify("⏰ 来不及撤回", f"«{last['name']}»已下载完成并入库转种\n要删的话去面板处理"); return
+        qb.delete(t["hash"], delete_files=True)
+        c = db(); c.execute("DELETE FROM pending_seed WHERE name=?", (last.get("cname",""),)); c.commit(); c.close()
+        logmsg("INFO", f"微信撤回下载: {last['name']}")
+        notify(f"↩️ 已撤回 · {last['name']}", "任务已取消,已下载的数据已清理")
+        _CHAT["last"] = None
+    except Exception as e:
+        notify("❌ 撤回失败", str(e)[:50])
 
 def wecom_on_text(text):
     text = (text or "").strip()
     if not text: return
+    if text in ("撤回", "取消下载"):
+        _chat_undo(); return
+    if text == "0":
+        if _CHAT.get("stage") == "torrents":
+            _chat_send_groups()          # 返回片单
+        else:
+            _CHAT["stage"] = "idle"; _CHAT["groups"] = []
+            notify("已取消", "发片名重新搜索")
+        return
     if text.isdigit() and len(text) <= 2:
-        _chat_pick(int(text)); return
+        if _CHAT.get("stage") == "torrents":
+            _chat_pick_torrent(int(text))
+        else:
+            _chat_pick_group(int(text))
+        return
     notify(f"🔍 收到「{text}」,全站搜索中…", "约 40~60 秒,结果稍后推送")
     threading.Thread(target=_chat_search, args=(text,), daemon=True).start()
 
@@ -450,6 +503,10 @@ def bdecode(data):
             return d, i+1
         j = data.index(b':', i); n = int(data[i:j]); return data[j+1:j+1+n], j+1+n
     return parse(0)[0]
+
+def torrent_infohash(data):
+    import hashlib
+    return hashlib.sha1(bencode(bdecode(data)[b"info"])).hexdigest()
 
 def torrent_files(data):
     info = bdecode(data)[b'info']
