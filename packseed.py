@@ -1500,8 +1500,9 @@ h1{font-size:26px;font-weight:700;letter-spacing:-.02em;margin:0 0 2px;text-shad
 .card{background:var(--card);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:20px;padding:6px 0;margin-bottom:20px;overflow:hidden}
 .card h2{font-size:15px;font-weight:600;margin:16px 20px 10px;letter-spacing:-.01em}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
-.stat{background:var(--card);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:20px;padding:18px 20px}
-.stat .n{font-size:30px;font-weight:700;letter-spacing:-.02em}.stat .l{color:var(--sub);font-size:12px;margin-top:2px}
+.stat{background:rgba(255,255,255,.94);border-radius:20px;padding:18px 20px;box-shadow:0 10px 30px rgba(0,10,60,.35)}
+.stat .n{font-size:30px;font-weight:800;letter-spacing:-.02em;color:var(--ikb)}
+.stat .l{color:rgba(0,30,110,.6);font-size:12px;margin-top:2px;font-weight:500}
 table{width:100%;border-collapse:collapse}
 th{color:var(--sub);font-weight:500;font-size:12px;text-align:left;padding:8px 20px;border-top:none}
 td{text-align:left;padding:11px 20px;border-top:1px solid var(--line);font-size:13px}
@@ -1589,7 +1590,7 @@ animation:seadrift 46s ease-in-out infinite alternate;z-index:0}
 .rname{font-size:12px;font-weight:600;margin-top:7px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ryear{font-size:11px;color:var(--sub);margin-top:1px}
 </style></head><body><div class=wrap>
-<h1 style="display:flex;align-items:center;gap:11px"><svg width="34" height="34" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="14" fill="#0a2fb5" stroke="rgba(255,255,255,.35)"/><circle cx="46" cy="17" r="7.5" fill="#FFD400"/><path d="M2 37c7-9 15-9 21 0s15 9 21 0 12-8 18-3v30H2z" fill="#ffffff" opacity="0.95"/><path d="M2 47c7-7 13-7 19 0s15 7 21 0 14-7 20-1v18H2z" fill="#CFE0FF" opacity="0.9"/></svg>观澜 <span style="font-size:15px;font-weight:600;color:rgba(255,255,255,.6);letter-spacing:.04em">Wavegazer</span></h1><div class=sub>观影观澜 · 搜索 / 下载 / 刮削 / 保种 / 辅种 —— 一个人的影音港湾</div>
+<h1 style="display:flex;align-items:center;gap:11px"><svg width="34" height="34" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="14" fill="#0a2fb5"/><circle cx="46" cy="17" r="7.5" fill="#FFD400"/><path d="M2 37c7-9 15-9 21 0s15 9 21 0 12-8 18-3v30H2z" fill="#ffffff" opacity="0.95"/><path d="M2 47c7-7 13-7 19 0s15 7 21 0 14-7 20-1v18H2z" fill="#CFE0FF" opacity="0.9"/></svg>观澜 <span style="font-size:15px;font-weight:600;color:rgba(255,255,255,.6);letter-spacing:.04em">Wavegazer</span></h1><div class=sub>观影观澜 · 搜索 / 下载 / 刮削 / 保种 / 辅种 —— 一个人的影音港湾</div>
 <div class=tabs>
 <a href="#search" class="tabbtn" data-t="search">🔍 搜索下载</a>
 <a href="#dl" class="tabbtn" data-t="dl">⬇️ 下载管理</a>
@@ -1618,7 +1619,7 @@ animation:seadrift 46s ease-in-out infinite alternate;z-index:0}
 <div class=stat><div class=n id=d-disk>—</div><div class=l id=d-diskl>存储剩余</div></div>
 <div class=stat><div class=n id=d-speed>—</div><div class=l id=d-speedl>实时速率</div></div>
 <div class=stat><div class=n id=d-media>—</div><div class=l id=d-medial>媒体库</div></div>
-<div class=stat><div class=n style=color:var(--pop) id=d-seed>—</div><div class=l id=d-seedl>做种中</div></div>
+<div class=stat><div class=n style=color:#E8A400 id=d-seed>—</div><div class=l id=d-seedl>做种中</div></div>
 </div>
 <div class="card recentcard"><h2>🎬 最近入库 <span class=mut style=font-weight:400>· 点海报看简介</span></h2><div class=rflow><div class=rtrack id=rtrack>{{RECENT}}</div></div></div>
 <div id=im-ov onclick="this.classList.remove('show')"><div id=im-box onclick="event.stopPropagation()"><img id=im-img><div><div id=im-t></div><div id=im-p></div><a id=im-a target=_blank>在 Emby 中打开 →</a></div></div></div>
