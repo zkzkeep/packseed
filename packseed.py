@@ -635,6 +635,98 @@ def organize_music(ih, name, files):
     logmsg("INFO", f"音乐入库 {name[:44]} | {n}个文件 + {lrc}首歌词 + {cov}张封面 → {root}")
     return root, n
 
+def _xesc(s): return (str(s or "")).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+def _tmdb_opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler(
+        {"http": CFG["TMDB_PROXY"], "https": CFG["TMDB_PROXY"]})) if CFG["TMDB_PROXY"] else urllib.request.build_opener()
+
+def tmdb_details(mtype, tid, season=None):
+    try:
+        if season is not None: return _tmdb_call(f"/tv/{tid}/season/{season}", language="zh-CN")
+        return _tmdb_call(f"/{mtype}/{tid}", language="zh-CN")
+    except Exception: return {}
+
+def write_nfo(path, tag, fields, genres=(), raw=()):
+    xml = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', f"<{tag}>"]
+    for k, v in fields:
+        if v not in (None, ""): xml.append(f"  <{k}>{_xesc(v)}</{k}>")
+    for g in genres: xml.append(f"  <genre>{_xesc(g)}</genre>")
+    for r in raw: xml.append("  " + r)
+    xml.append(f"</{tag}>")
+    open(path, "w", encoding="utf-8").write("\n".join(xml))
+    try: os.chown(path, int(os.environ.get("PUID","1000")), int(os.environ.get("PGID","1001")))
+    except Exception: pass
+
+_SE_RE = re.compile(r'S(\d{1,2})\s?E(\d{1,3})', re.I)
+_EP_RE = re.compile(r'(?:EP|E|第)(\d{1,3})(?=[.\s_\-集话話]|$)', re.I)
+
+def _grab_img(op, path, dst, size):
+    if not path or os.path.exists(dst): return
+    try:
+        img = op.open(f"https://image.tmdb.org/t/p/{size}{path}", timeout=25).read()
+        if len(img) > 5000:
+            open(dst, "wb").write(img)
+            try: os.chown(dst, int(os.environ.get("PUID","1000")), int(os.environ.get("PGID","1001")))
+            except Exception: pass
+    except Exception: pass
+
+def scrape_pack(dest, m):
+    """自给自足刮削包：nfo+海报+背景+标准重命名+每集nfo,全落在本地。
+    Emby/Jellyfin/Kodi/Infuse 谁来都拿来即用,不依赖播放器自己刮。硬链接改名不影响做种。"""
+    mt = m["mtype"]; tid = m["id"]; title = _safe(m["tmdb_name"]); year = m.get("year", "")
+    d = tmdb_details(mt, tid); op = _tmdb_opener()
+    _grab_img(op, d.get("poster_path") or m.get("poster"), os.path.join(dest, "poster.jpg"), "w780")
+    _grab_img(op, d.get("backdrop_path"), os.path.join(dest, "fanart.jpg"), "w1280")
+    genres = [g.get("name","") for g in (d.get("genres") or [])][:6]
+    plot = d.get("overview") or m.get("overview", "")
+    rating = round(d.get("vote_average") or 0, 1) or ""
+    uid = f'<uniqueid type="tmdb" default="true">{tid}</uniqueid>'
+    if mt == "tv":
+        write_nfo(os.path.join(dest, "tvshow.nfo"), "tvshow",
+                  [("title", d.get("name") or m["tmdb_name"]), ("plot", plot), ("year", year),
+                   ("premiered", d.get("first_air_date","")), ("rating", rating), ("tmdbid", tid)], genres, (uid,))
+        season_cache = {}
+        for f in sorted(os.listdir(dest)):
+            fp = os.path.join(dest, f)
+            if not os.path.isfile(fp): continue
+            stem, ext = os.path.splitext(f)
+            is_video = ext.lower() in _VIDEO_EXT; is_sub = ext.lower() in (".srt",".ass",".sub")
+            if not (is_video or is_sub): continue
+            mm = _SE_RE.search(stem)
+            if mm: ss, ee = int(mm.group(1)), int(mm.group(2))
+            else:
+                m2 = _EP_RE.search(stem)
+                if not m2: continue
+                ss, ee = 1, int(m2.group(1))
+            newstem = f"{title} - S{ss:02d}E{ee:02d}"
+            newf = newstem + ext
+            if f != newf:
+                np = os.path.join(dest, newf)
+                if os.path.exists(np): newstem = stem
+                else: os.rename(fp, np)
+            if is_video:
+                nfop = os.path.join(dest, newstem + ".nfo")
+                if os.path.exists(nfop): continue
+                if ss not in season_cache: season_cache[ss] = tmdb_details("tv", tid, season=ss)
+                eps = {e.get("episode_number"): e for e in (season_cache[ss].get("episodes") or [])}
+                e = eps.get(ee) or {}
+                write_nfo(nfop, "episodedetails",
+                          [("title", e.get("name") or f"第 {ee} 集"), ("season", ss), ("episode", ee),
+                           ("plot", e.get("overview","")), ("aired", e.get("air_date",""))])
+    else:
+        write_nfo(os.path.join(dest, "movie.nfo"), "movie",
+                  [("title", d.get("title") or m["tmdb_name"]), ("plot", plot), ("year", year),
+                   ("premiered", d.get("release_date","")), ("rating", rating), ("tmdbid", tid)], genres, (uid,))
+        if not os.path.isdir(os.path.join(dest, "BDMV")):   # 原盘不动
+            vids = [f for f in os.listdir(dest) if os.path.isfile(os.path.join(dest, f))
+                    and os.path.splitext(f)[1].lower() in _VIDEO_EXT]
+            if len(vids) == 1:
+                ext = os.path.splitext(vids[0])[1]
+                nn = f"{title} ({year}){ext}" if year else f"{title}{ext}"
+                if vids[0] != nn and not os.path.exists(os.path.join(dest, nn)):
+                    os.rename(os.path.join(dest, vids[0]), os.path.join(dest, nn))
+
 def emby_refresh():
     if not (CFG["EMBY_URL"] and CFG["EMBY_KEY"]): return
     try:
@@ -653,17 +745,10 @@ def do_organize(ih, name, files, m, cat):
               (ih, name, cat, m["mtype"], m["id"], m["tmdb_name"], m["year"], "", m["conf"], "processing", len(files), int(time.time())))
     c.commit(); c.close()
     dest, n = organize_files(files, m, cat)
-    # 兜底本地海报: TMDB 有图就落 poster.jpg,Emby 优先读本地,刮削抽风也不怕
     try:
-        if m.get("poster") and not os.path.exists(os.path.join(dest, "poster.jpg")):
-            op = urllib.request.build_opener(urllib.request.ProxyHandler(
-                {"http": CFG["TMDB_PROXY"], "https": CFG["TMDB_PROXY"]})) if CFG["TMDB_PROXY"] else urllib.request.build_opener()
-            img = op.open("https://image.tmdb.org/t/p/w780" + m["poster"], timeout=25).read()
-            if len(img) > 5000:
-                pp = os.path.join(dest, "poster.jpg"); open(pp, "wb").write(img)
-                try: os.chown(pp, int(os.environ.get("PUID","1000")), int(os.environ.get("PGID","1001")))
-                except Exception: pass
-    except Exception: pass
+        scrape_pack(dest, m)      # 自给自足刮削包: nfo+图+标准命名,不依赖播放器刮削
+    except Exception as e:
+        logmsg("WARN", f"刮削包生成失败 {name[:24]}: {str(e)[:40]}")
     c = db(); c.execute("UPDATE media SET target=?, files=?, status='done' WHERE info_hash=?", (dest, n, ih)); c.commit(); c.close()
     logmsg("INFO", f"入库 {m['tmdb_name']} ({m['year']}) ← {name[:36]} | {n}个文件 → {dest}")
     emby_refresh()
