@@ -388,15 +388,30 @@ def tmdb_match(name):
             cand.sort(key=lambda r: (_ryear(r) or "9999"))
         else:
             cand.sort(key=lambda r: -(r.get("popularity") or 0))   # 正片热度远高于总集篇/衍生
-        # 优先级：名字准+年份准 > 年份准 > 仅名字准(兜住"请回答1988"这种解析出错年份的) > 首位候选
-        exact = [r for r in cand if (r.get("name") or r.get("title")) == q]
+        # 优先级：名字准+年份准 > 名字像+年份准 > 仅名字准 > 年份对但名字完全不像(不可信,low) > 首位候选(low)
+        def _names(r):
+            return [x for x in [r.get("name") or r.get("title"),
+                                r.get("original_name") or r.get("original_title")] if x]
+        def _namefit(r):
+            ql = q.lower()
+            for nn in _names(r):
+                n = nn.lower()
+                if CJK.search(q) or CJK.search(n):
+                    if ql in n or n in ql: return True
+                # 英文按词边界，防 Sakra 误配 Sakrament 这种子串陷阱
+                elif re.search(r'(^|\W)' + re.escape(ql) + r'(\W|$)', n) or \
+                     re.search(r'(^|\W)' + re.escape(n) + r'(\W|$)', ql):
+                    return True
+            return False
+        exact = [r for r in cand if q in _names(r)]
         if year:
             ye = [r for r in cand if _ryear(r) == year]
             exact_ye = [r for r in ye if r in exact]
-            if exact_ye: pick = (exact_ye[0], "high")
-            elif ye:     pick = (ye[0], "high")
-            elif exact:  pick = (exact[0], "high")
-            else:        pick = (cand[0], "low")
+            ye_fit = [r for r in ye if _namefit(r)]
+            if exact_ye:  pick = (exact_ye[0], "high")
+            elif ye_fit:  pick = (ye_fit[0], "high")
+            elif exact:   pick = (exact[0], "high")   # 名字精确但年份解析错了(请回答1988型)
+            else:         pick = ((ye[0], "low") if ye else (cand[0], "low"))
         else:
             pick = (exact[0], "high") if exact else (cand[0], "mid")
         r, conf = pick
@@ -1119,7 +1134,7 @@ class Handler(BaseHTTPRequestHandler):
             if not k: continue
             try: m = tmdb_match(info["rep"])
             except Exception: m = None
-            if m: matched[k] = m
+            if m and m["conf"] != "low": matched[k] = m   # 低置信别乱建分组,进"未识别"兜底
         groups = {}; other = []
         for x in out:
             m = matched.get(x.pop("k"))
