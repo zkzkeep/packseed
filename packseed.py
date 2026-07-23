@@ -28,6 +28,7 @@ CFG = {
     "QB_USER":      os.environ.get("QB_USER", "admin"),
     "QB_PASS":      os.environ.get("QB_PASS", ""),
     "QB_CATEGORY":  os.environ.get("QB_CATEGORY", ""),     # 兜底分类，留空则按识别的类型(电影/电视剧/动漫)
+    "MIN_SEEDERS":  int(os.environ.get("MIN_SEEDERS", "20")),  # 搜索结果做种数门槛;整体都低时保留前20%
     # —— 整理器（识别+刮削入库）——
     "TMDB_KEY":     os.environ.get("TMDB_KEY", ""),
     "TMDB_PROXY":   os.environ.get("TMDB_PROXY", ""),      # TMDB 走代理(国内需要)，如 http://x:7890
@@ -1107,6 +1108,14 @@ class Handler(BaseHTTPRequestHandler):
                 g["results"].append(x)
             else:
                 other.append(x)
+        # 做种数过滤：低保种的下不动没意义；某内容整体都低则保留其前20%(冷门留余地)
+        def seed_filter(rs):
+            good = [x for x in rs if x["seeders"] >= CFG["MIN_SEEDERS"]]
+            if good: return good
+            return rs[:max(1, round(len(rs) * 0.2))]   # rs 已按做种数降序
+        for g in groups.values():
+            g["results"] = seed_filter(g["results"])
+        if other: other = seed_filter(other)
         glist = sorted(groups.values(), key=lambda g: -len(g["results"]))
         s._send_json({"ok": True, "groups": glist, "other": other})
     def _poster(s):
