@@ -1595,6 +1595,12 @@ background-color:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px soli
 </div>
 </div>
 <div id=sresult></div>
+<div class=stats id=dash>
+<div class=stat><div class=n id=d-disk>—</div><div class=l id=d-diskl>存储剩余</div></div>
+<div class=stat><div class=n id=d-speed>—</div><div class=l id=d-speedl>实时速率</div></div>
+<div class=stat><div class=n id=d-media>—</div><div class=l id=d-medial>媒体库</div></div>
+<div class=stat><div class=n style=color:var(--pop) id=d-seed>—</div><div class=l id=d-seedl>做种中</div></div>
+</div>
 <div class=card><h2>🎬 最近入库</h2><div class=rstrip>{{RECENT}}</div></div>
 </div>
 <div id=tab-media class=tab>
@@ -1689,9 +1695,9 @@ function dockify(el){
   for(var i=0;i<cards.length;i++){
    var c=cards[i],r=c.getBoundingClientRect();
    var d=Math.abs(mx-(r.left+r.width/2));
-   var t=Math.max(0,1-d/230);        // 磁场半径230px
+   var t=Math.max(0,1-d/260);        // 磁场半径260px
    t=t*t;                             // 平方衰减: 越近隆起越陡,远处几乎不动
-   var s=1+0.17*t, y=-9*t;
+   var s=1+0.32*t, y=-18*t;
    c.style.transform='scale('+s.toFixed(3)+') translateY('+y.toFixed(1)+'px)';
    c.style.zIndex=t>0.4?2:1;
   }
@@ -1703,6 +1709,22 @@ function dockify(el){
  });
 }
 dockify(document.querySelector('.rstrip'));
+function fmtB(n,s){n=n||0;var u=['B','KB','MB','GB','TB'];var i=0;while(n>=1024&&i<4){n/=1024;i++}return n.toFixed(n>=100||i==0?0:1)+u[i]+(s||'');}
+function pollDash(){
+ fetch('/api/dashboard').then(r=>r.json()).then(function(d){
+  if(d.disk){document.getElementById('d-disk').textContent=fmtB(d.disk.free);
+   document.getElementById('d-diskl').textContent='存储剩余 · 共'+fmtB(d.disk.total)+' 已用'+Math.round(d.disk.used/d.disk.total*100)+'%';}
+  var down=((d.qb&&d.qb.down)||0)+((d.tr&&d.tr.down)||0);
+  var up=((d.qb&&d.qb.up)||0)+((d.tr&&d.tr.up)||0);
+  document.getElementById('d-speed').textContent='↓'+fmtB(down,'/s');
+  document.getElementById('d-speedl').textContent='↑'+fmtB(up,'/s')+' 保种上传中';
+  if(d.media){document.getElementById('d-media').textContent=(d.media.movie+d.media.tv+d.media.anime)+' 部';
+   document.getElementById('d-medial').textContent='影视 · 另有 '+d.media.song+' 首音乐';}
+  if(d.tr){document.getElementById('d-seed').textContent=d.tr.count;
+   document.getElementById('d-seedl').textContent='做种中 · 今日已上传 '+fmtB(d.tr.up_today);}
+ }).catch(()=>{});
+}
+pollDash();setInterval(pollDash,5000);
 function research(h,el){
  var inp=el.parentNode.querySelector('input');var q=inp.value.trim();
  if(!q){inp.focus();return;}
@@ -1854,6 +1876,7 @@ td{text-align:left;padding:9px 6px;border-top:1px solid var(--line);font-size:13
 <div class=mut style=text-align:center;font-size:12px>观澜 GuanLan</div>
 </div></body></html>"""
 
+_DASH_MEDIA = {}
 _DLMETA = {}
 def _dlmeta(h, name):
     """下载页海报：每个种子只做一次 TMDB 识别，缓存住(轮询4秒一次,不能每次都查)"""
@@ -2097,6 +2120,8 @@ class Handler(BaseHTTPRequestHandler):
             s._reid(); return
         if s.path.startswith("/api/poster"):
             s._poster(); return
+        if s.path.startswith("/api/dashboard"):
+            s._dashboard(); return
         if s.path.startswith("/api/downloads"):
             s._downloads(); return
         if s.path.startswith("/api/canceldl"):
@@ -2272,6 +2297,42 @@ class Handler(BaseHTTPRequestHandler):
             s._send_json({"ok":True})
         except Exception as e:
             s._send_json({"ok":False,"err":str(e)[:60]})
+    def _dashboard(s):
+        out = {}
+        try:
+            import shutil
+            du = shutil.disk_usage("/data")
+            out["disk"] = {"total": du.total, "used": du.used, "free": du.free}
+        except Exception: pass
+        try:
+            st = TR().call("session-stats", {})["arguments"]
+            out["tr"] = {"up": st.get("uploadSpeed", 0), "down": st.get("downloadSpeed", 0),
+                         "count": st.get("torrentCount", 0), "active": st.get("activeTorrentCount", 0),
+                         "up_today": (st.get("current-stats") or {}).get("uploadedBytes", 0),
+                         "up_total": (st.get("cumulative-stats") or {}).get("uploadedBytes", 0)}
+        except Exception: pass
+        try:
+            q = json.loads(QB()._get("/api/v2/transfer/info").decode())
+            out["qb"] = {"down": q.get("dl_info_speed", 0), "up": q.get("up_info_speed", 0)}
+        except Exception: pass
+        global _DASH_MEDIA
+        try:
+            if time.time() - _DASH_MEDIA.get("ts", 0) > 600:
+                cnt = {"movie": 0, "tv": 0, "anime": 0, "song": 0}
+                for root, key in (("/data/media/movies", "movie"), ("/data/media/tv", "tv"), ("/data/media/anime", "anime")):
+                    if os.path.isdir(root):
+                        ents = os.listdir(root)
+                        cnt[key] = sum(1 for e in ents if os.path.isdir(os.path.join(root, e))) +                                    sum(1 for e in ents if e.lower().endswith((".mkv", ".mp4", ".ts", ".avi")))
+                mroot = "/data/media/music"
+                if os.path.isdir(mroot):
+                    n = 0
+                    for _r, _d, fs in os.walk(mroot):
+                        n += sum(1 for f in fs if f.lower().endswith((".flac", ".mp3", ".ape", ".wav", ".m4a")))
+                    cnt["song"] = n
+                _DASH_MEDIA = {"ts": time.time(), "cnt": cnt}
+            out["media"] = _DASH_MEDIA["cnt"]
+        except Exception: pass
+        s._send_json(out)
     def _downloads(s):
         out = {"dl": [], "done": []}
         try:
