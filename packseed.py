@@ -1086,11 +1086,12 @@ function renderWall(){
   sel.appendChild(mkTable(rs));
   sel.scrollIntoView({behavior:'smooth',block:'nearest'});
  }
- var CN={movie:'电影',tv:'剧集',anime:'动漫'};
+ var CN={movie:'电影',tv:'剧集',anime:'动漫',music:'音乐'};
  gs.forEach(function(g){
   var card=document.createElement('div');card.className='pcard';
-  if(g.poster){var im=document.createElement('img');im.className='pw';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(g.poster);card.appendChild(im);}
-  else{var ph=document.createElement('div');ph.className='ph';ph.textContent=g.cat=='anime'?'🎌':(g.mtype=='tv'?'📺':'🎬');card.appendChild(ph);}
+  if(g.posterurl){var im=document.createElement('img');im.className='pw';im.loading='lazy';im.src=g.posterurl;card.appendChild(im);}
+  else if(g.poster){var im=document.createElement('img');im.className='pw';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(g.poster);card.appendChild(im);}
+  else{var ph=document.createElement('div');ph.className='ph';ph.textContent=g.cat=='music'?'🎵':(g.cat=='anime'?'🎌':(g.mtype=='tv'?'📺':'🎬'));card.appendChild(ph);}
   var nm=document.createElement('div');nm.className='pname';nm.textContent=g.name+(g.year?' ('+g.year+')':'');card.appendChild(nm);
   var mt=document.createElement('div');mt.className='pmeta';mt.textContent=(CN[g.cat]||CN[g.mtype])+' · '+g.results.length+' 个种 · 最高做种 '+(g.results[0]?g.results[0].seeders:0);card.appendChild(mt);
   card.title=g.overview||'';
@@ -1199,6 +1200,36 @@ def _dlmeta(h, name):
     return m
 
 
+def music_clean(t):
+    """音乐种子名清洗成 iTunes 可搜的 '歌手 专辑' 形式"""
+    s = re.sub(r'\[[^\]]*\]|【[^】]*】|\([^)]*\)', ' ', t)
+    s = re.sub(r'\b(FLAC|APE|WAV|WV|MP3|AAC|OGG|DSD|DSF|DFF|SACD|MQA|Hi-?Res|\d+bit|\d+kHz|320K|'
+               r'CD\d*|\dCD|WEB|BD|24-\d+|16-\d+|无损|专辑|合集|精选集?|全集|正版|首版|限定盘?|日版|港版|台版|新歌\+?)\b', ' ', s, flags=re.I)
+    s = re.sub(r'(19|20)\d{2}', ' ', s)
+    s = re.sub(r'[.\-_/+·]+', ' ', s)
+    return ' '.join(s.split())[:40]
+
+_MUSIC_CACHE = {}
+def music_match(cleaned):
+    """iTunes Search 认专辑：返回 {artist,album,year,art,id} 或 None,缓存6小时"""
+    hit = _MUSIC_CACHE.get(cleaned)
+    if hit and time.time() - hit[1] < 21600: return hit[0]
+    m = None
+    try:
+        qq = urllib.parse.urlencode({"term": cleaned, "media": "music", "entity": "album", "limit": 1, "country": "cn"})
+        r = json.load(urllib.request.urlopen("https://itunes.apple.com/search?" + qq, timeout=12))
+        res = r.get("results") or []
+        if res:
+            x = res[0]
+            m = {"artist": x.get("artistName",""), "album": x.get("collectionName",""),
+                 "year": (x.get("releaseDate") or "")[:4],
+                 "art": (x.get("artworkUrl100") or "").replace("100x100", "300x300"),
+                 "id": x.get("collectionId")}
+    except Exception: pass
+    if len(_MUSIC_CACHE) > 1000: _MUSIC_CACHE.clear()
+    _MUSIC_CACHE[cleaned] = (m, time.time())
+    return m
+
 def search_group(q, results, log=lambda m: None):
     """Prowlarr 结果 → 做种过滤 + TMDB 识别分组。log 回调用于搜索过程直播。"""
     def catlab(r):
@@ -1218,6 +1249,37 @@ def search_group(q, results, log=lambda m: None):
                     "url": url, "cat": catlab(r), "info": r.get("infoUrl") or ""})
     out.sort(key=lambda x: x["seeders"], reverse=True)
     out = out[:100]
+    # 音乐走 iTunes 识别(TMDB不管音乐)，其余走 TMDB
+    for x in out:
+        if x["cat"] != "music" and meta_is_music(x["title"]):
+            x["cat"] = "music"
+    music = [x for x in out if x["cat"] == "music"]
+    out = [x for x in out if x["cat"] != "music"]
+    mgroups = {}
+    if music:
+        mkeys = {}
+        for x in music:
+            ck = music_clean(x["title"]).lower()
+            x["mk"] = ck
+            mkeys.setdefault(ck, {"rep": music_clean(x["title"]), "n": 0})["n"] += 1
+        mtodo = [kv for kv in sorted(mkeys.items(), key=lambda kv: -kv[1]["n"])[:15] if kv[0]]
+        mmatched = {}
+        for i, (ck, info) in enumerate(mtodo):
+            mm = music_match(info["rep"])
+            if mm:
+                mmatched[ck] = mm
+                log(f"🎵 识别专辑 {i+1}/{len(mtodo)}: {info['rep'][:30]} → {mm['artist']} - {mm['album']}")
+            else:
+                log(f"🧩 识别专辑 {i+1}/{len(mtodo)}: {info['rep'][:30]} → 未识别")
+        for x in music:
+            mm = mmatched.get(x.pop("mk", ""))
+            if mm:
+                g = mgroups.setdefault(mm["id"], {"name": f"{mm['album']} · {mm['artist']}", "year": mm["year"],
+                                                  "mtype": "music", "cat": "music", "poster": "",
+                                                  "posterurl": mm["art"], "overview": mm["artist"], "results": []})
+                g["results"].append(x)
+            else:
+                x.pop("k", None); out.append(x)   # 认不出的专辑回到普通流(最终进未识别)
     keys = {}
     for x in out:
         k = extract_query(x["title"]).lower()
@@ -1250,10 +1312,11 @@ def search_group(q, results, log=lambda m: None):
         good = [x for x in rs if x["seeders"] >= CFG["MIN_SEEDERS"]]
         if good: return good
         return rs[:max(1, round(len(rs) * 0.2))]
-    for g in groups.values():
+    allg = list(groups.values()) + list(mgroups.values())
+    for g in allg:
         g["results"] = seed_filter(g["results"])
     if other: other = seed_filter(other)
-    glist = sorted(groups.values(), key=lambda g: -(g["results"][0]["seeders"] if g["results"] else 0))
+    glist = sorted(allg, key=lambda g: -(g["results"][0]["seeders"] if g["results"] else 0))
     return {"ok": True, "groups": glist, "other": other}
 
 def prowlarr_indexers():
