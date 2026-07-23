@@ -1782,6 +1782,12 @@ select.ksin option{color:#00206e}
 <button class=dlbtn style="padding:7px 16px;background:rgba(255,255,255,.2);color:#fff" onclick="ksAll()">全选显示项</button>
 <button class=dlbtn style="padding:7px 20px;background:var(--pop);color:#00206e" onclick="ksPush(this)">⬇️ 推送选中保种</button>
 </div>
+<div style="padding:0 20px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px;border-top:1px solid var(--line);margin:0 20px;padding-top:12px">
+<span style="font-weight:700">🤖 自动拉满:</span>
+目标量<input id=ks-tgt class=ksin style="width:80px" placeholder="2048">GB
+<button class=dlbtn style="padding:7px 20px;background:var(--pop);color:#00206e" onclick="ksAuto(this)">🤖 自动拉满目标量</button>
+<span class=mut>后台自动翻页,套用上面的站点/关键词/筛选,去重(队列+tr已有),边拉边下,够量收工。2T 填 2048</span>
+</div>
 <div id=ks-list style="padding:0 20px 16px"><span class=mut>选个站点开拉。空关键词=按站内最新排列。</span></div>
 </div>
 <div class=card><h2>📦 保种任务 <span class=mut style=font-weight:400>· 队列逐个下载推 qb · <button class=dlbtn style="padding:4px 14px;font-size:12px;background:rgba(255,255,255,.2);color:#fff" onclick="ksStop()">⏹ 停止并清空队列</button></span></h2>
@@ -1945,13 +1951,29 @@ function ksPush(btn){
  .catch(function(){btn.disabled=false;toast('失败');});
 }
 function ksStop(){fetch('/api/ks/stop').then(r=>r.json()).then(()=>{toast('已停止,队列清空');ksStatus();});}
+function ksAuto(btn){
+ var ix=document.getElementById('ks-ix').value;
+ var tgt=parseFloat(document.getElementById('ks-tgt').value)||0;
+ if(!ix){toast('先选站点');return;}
+ if(!tgt){toast('填目标量(GB),2T=2048');return;}
+ var q=document.getElementById('ks-q').value.trim();
+ var mg=parseFloat(document.getElementById('ks-fsize').value)||0;
+ var ms=document.getElementById('ks-fseed').value.trim();
+ if(!confirm('自动翻页拉取该站种子直到入队约 '+tgt+' GB(套用当前筛选,已有的自动跳过),边拉边下。继续?'))return;
+ btn.disabled=true;
+ fetch('/api/ks/auto?ix='+ix+'&q='+encodeURIComponent(q)+'&target='+tgt+'&fsize='+mg+'&fseed='+(ms===''?'-1':ms))
+ .then(r=>r.json()).then(function(d){btn.disabled=false;toast(d.ok?'🤖 自动拉取已启动,看下方任务进度':'启动失败: '+(d.err||''));ksStatus();})
+ .catch(function(){btn.disabled=false;toast('启动失败');});
+}
 function ksStatus(){
  fetch('/api/ks/status').then(r=>r.json()).then(function(d){
   var el=document.getElementById('ks-stat');if(!el)return;
   var h='<div style="font-size:13px;line-height:2">'
    +(d.running?'🔄 执行中: <b>'+(d.cur||'…')+'</b>':'⏸ 空闲')
    +' · 队列 <b>'+d.queued+'</b> · 已推qb <b style=color:var(--pop)>'+d.pushed+'</b> · 已转tr <b style=color:#7dffb0>'+d.done+'</b> · 失败 '+d.error
-   +' · 磁盘余 '+d.free+'GB'+(d.msg?'<br>'+d.msg:'')+'</div>';
+   +' · 磁盘余 '+d.free+'GB'
+   +(d.af||d.afmsg?'<br>'+(d.af?'🤖 ':'')+(d.afmsg||''):'')
+   +(d.msg?'<br>'+d.msg:'')+'</div>';
   el.innerHTML=h;
  }).catch(()=>{});
 }
@@ -2482,6 +2504,53 @@ def keepseed_worker():
             time.sleep(max(CFG["SNATCH_DELAY"], 3))   # 节流:别把站打炸
     finally:
         _KS.update(running=False, cur="")
+
+_KSF = {"running": False, "stop": False, "msg": ""}
+def ks_autofill(ixid, query, target_gb, max_gb, max_seed):
+    """自动拉满:后台翻页拉站内列表,按筛选条件入队,累计到目标体积收工。边拉边下。"""
+    _KSF.update(running=True, stop=False, msg="🤖 自动拉取启动…")
+    try:
+        # 去重底账:保种队列历史 + tr 里已做种的(名字+大小)
+        c = db()
+        have = {(r[0], r[1]) for r in c.execute("SELECT name,size FROM keepseed").fetchall()}
+        c.close()
+        try: have |= {(t["name"], t["totalSize"]) for t in TR().torrents()}
+        except Exception: pass
+        total = added = 0; target = target_gb * 2**30; seen_urls = set()
+        for page in range(80):            # 最多80页兜底,防站点不支持深翻页时空转
+            if _KSF["stop"]: _KSF["msg"] = f"⏹ 已停止:入队{added}个 {human_size(total)}"; break
+            try:
+                rs = prowlarr_browse(ixid, query, page * 100)
+            except Exception as e:
+                _KSF["msg"] = f"⚠️ 第{page+1}页拉取失败({str(e)[:36]}),已入队{added}个 {human_size(total)}"; break
+            newu = [r for r in rs if r.get("downloadUrl") and r["downloadUrl"] not in seen_urls]
+            if not newu:
+                _KSF["msg"] = f"📄 站点翻到底了:入队{added}个 {human_size(total)}(目标{target_gb}GB)"; break
+            c = db()
+            for r in newu:
+                seen_urls.add(r["downloadUrl"])
+                nm, sz, sd = r.get("title") or "", r.get("size") or 0, r.get("seeders", 0) or 0
+                if sz <= 0: continue
+                if max_gb and sz > max_gb * 2**30: continue
+                if max_seed is not None and sd > max_seed: continue
+                if (nm, sz) in have: continue       # 队列里有过/tr已做种,不重复下
+                have.add((nm, sz))
+                c.execute("INSERT INTO keepseed(name,size,url,indexer,status,err,ts) VALUES(?,?,?,?,?,?,?)",
+                          (nm, sz, r["downloadUrl"], "", "queued", "", int(time.time())))
+                total += sz; added += 1
+                if total >= target: break
+            c.commit(); c.close()
+            if added and not _KS["running"]:        # 边拉边下,不等翻完
+                threading.Thread(target=keepseed_worker, daemon=True).start()
+            if total >= target:
+                _KSF["msg"] = f"✅ 目标达成:入队{added}个,共{human_size(total)}"; break
+            _KSF["msg"] = f"🤖 已翻{page+1}页 · 入队{added}个 · {human_size(total)} / 目标{target_gb}GB"
+            time.sleep(2)                           # 页间节流
+        logmsg("INFO", f"自动保种拉取结束: {added}个 {human_size(total)}")
+        if added and not _KS["running"]:
+            threading.Thread(target=keepseed_worker, daemon=True).start()
+    finally:
+        _KSF["running"] = False
 
 def gap_report():
     """缺种矩阵:每个内容在哪些站做种、哪些站搜不到(注意:搜不到≠一定没有,可能是站点抽风)"""
@@ -3030,11 +3099,27 @@ class Handler(BaseHTTPRequestHandler):
             except Exception: pass
             s._send_json({"ok": True, "running": _KS["running"], "cur": _KS["cur"], "msg": _KS["msg"],
                           "queued": cnt.get("queued", 0), "pushed": cnt.get("pushed", 0),
-                          "done": cnt.get("done", 0), "error": cnt.get("error", 0), "free": free_gb})
+                          "done": cnt.get("done", 0), "error": cnt.get("error", 0), "free": free_gb,
+                          "af": _KSF["running"], "afmsg": _KSF["msg"]})
             return
         if act == "stop":
-            _KS["stop"] = True
+            _KS["stop"] = True; _KSF["stop"] = True
             c = db(); c.execute("UPDATE keepseed SET status='skip' WHERE status='queued'"); c.commit(); c.close()
+            s._send_json({"ok": True}); return
+        if act == "auto":
+            if _KSF["running"]:
+                s._send_json({"ok": False, "err": "自动拉取已在跑"}); return
+            try:
+                ixid = int(q_.get("ix", ["0"])[0]); tgt = float(q_.get("target", ["0"])[0])
+                mg = float(q_.get("fsize", ["0"])[0] or 0)
+                fs = q_.get("fseed", [""])[0]
+                ms = None if fs in ("", "-1") else int(fs)
+            except Exception:
+                s._send_json({"ok": False, "err": "参数不对"}); return
+            if not ixid or tgt <= 0:
+                s._send_json({"ok": False, "err": "要选站点并填目标量"}); return
+            threading.Thread(target=ks_autofill,
+                             args=(ixid, (q_.get("q", [""])[0]).strip(), tgt, mg, ms), daemon=True).start()
             s._send_json({"ok": True}); return
         s._send_json({"ok": False, "err": "未知操作"})
     def _ks_add(s):
@@ -3046,8 +3131,11 @@ class Handler(BaseHTTPRequestHandler):
         items = body.get("items") or []
         n = 0
         c = db()
+        have = {(r[0], r[1]) for r in c.execute("SELECT name,size FROM keepseed WHERE status IN ('queued','pushed','done')").fetchall()}
         for it in items[:500]:
             if not it.get("url"): continue
+            if (it.get("name") or "", it.get("size") or 0) in have: continue   # 已推过的不重复(qb会拒收记成失败)
+            have.add((it.get("name") or "", it.get("size") or 0))
             # 注意:禁转种照样可以保种(只是不能转出去),不拦队列;禁转红线在转种助手里守
             c.execute("INSERT INTO keepseed(name,size,url,indexer,status,err,ts) VALUES(?,?,?,?,?,?,?)",
                       (it.get("name") or "", it.get("size") or 0, it["url"], it.get("indexer") or "", "queued", "", int(time.time())))
