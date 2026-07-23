@@ -1959,7 +1959,7 @@ function gapLoad(btn){
    var on=r.seeded.map(s=>'<span class="chip on">'+s+'</span>').join('');
    var off=r.missing.slice(0,12).map(s=>'<span class="chip off">'+s+'</span>').join('')+(r.missing.length>12?'<span class=mut> +'+(r.missing.length-12)+'</span>':'');
    h+='<tr><td class=name title="'+nm+'">'+nm+'</td><td class=r>'+r.sizeh+'</td><td>'+on+'</td><td>'+(r.missing.length?off:'<span class=mut>全覆盖 🎉</span>')+'</td>'
-    +'<td>'+(r.missing.length?'<button class=dlbtn style="padding:5px 14px;font-size:12px" onclick="xfer(\''+r.hash+'\')">🚚 资料包</button>':'')+'</td></tr>';
+    +'<td>'+(r.missing.length?'<button class=dlbtn style="padding:5px 14px;font-size:12px" data-h="'+r.hash+'" onclick="xfer(this.dataset.h)">🚚 资料包</button>':'')+'</td></tr>';
   });
   el.innerHTML=h+'</table>';
  }).catch(function(){if(btn){btn.disabled=false;btn.textContent='刷新';}});
