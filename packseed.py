@@ -403,7 +403,8 @@ def tmdb_match(name):
         if conf=="low" and q==tc and te and te.lower()!=tc.lower(): continue  # 中文低置信→再试英文
         return {"mtype":"tv" if r.get("media_type")=="tv" else "movie","id":r.get("id"),
                 "tmdb_name":(r.get("name") or r.get("title")),"year":_ryear(r),"conf":conf,"q":q,
-                "poster":r.get("poster_path") or "","overview":r.get("overview") or ""}
+                "poster":r.get("poster_path") or "","overview":r.get("overview") or "",
+                "anime": 16 in (r.get("genre_ids") or [])}
     return None
 
 def tmdb_by_id(tid, mtype_hint=""):
@@ -794,12 +795,12 @@ a{color:var(--acc)}
 <div class=card><h2>🔍 搜索下载 <span class=mut style=font-weight:400>· 选类型缩小范围 · 海报墙点选 · 一键下到 qb</span></h2>
 <div class=searchbar><input id=q placeholder="输入片名，回车搜索" onkeydown="if(event.key=='Enter')doSearch()"><button onclick=doSearch()>搜索</button></div>
 <div class=fbar><span class=mut style=font-size:12px>类型:</span>
-<span class=fpill data-c=2000 onclick=tgF(this)>🎬 电影</span>
-<span class=fpill data-c=5000 onclick=tgF(this)>📺 电视剧</span>
-<span class=fpill data-c=5070 onclick=tgF(this)>🎌 动漫</span>
-<span class=fpill data-c=7030 onclick=tgF(this)>📖 漫画</span>
-<span class=fpill data-c=3000 onclick=tgF(this)>🎵 音乐</span>
-<span class=mut style=font-size:12px>· 不选=全部</span></div>
+<span class=fpill data-f=movie onclick=tgF(this)>🎬 电影</span>
+<span class=fpill data-f=tv onclick=tgF(this)>📺 电视剧</span>
+<span class=fpill data-f=anime onclick=tgF(this)>🎌 动漫</span>
+<span class=fpill data-f=book onclick=tgF(this)>📖 漫画/书</span>
+<span class=fpill data-f=music onclick=tgF(this)>🎵 音乐</span>
+<span class=mut style=font-size:12px>· 搜完点着切换,不用重搜 · 不选=全部</span></div>
 <div id=sresult></div></div>
 </div>
 <div id=tab-media class=tab>
@@ -852,47 +853,60 @@ function mkTable(rs){
  });
  return tbl;
 }
-function tgF(el){el.classList.toggle('on');}
+var _sd=null;
+function tgF(el){
+ var was=el.classList.contains('on');
+ document.querySelectorAll('.fpill').forEach(e=>e.classList.remove('on'));
+ if(!was)el.classList.add('on');
+ if(_sd)renderWall();
+}
+function activeF(){var e=document.querySelector('.fpill.on');return e?e.dataset.f:'';}
+function renderWall(){
+ var d=_sd,box=document.getElementById('sresult'),f=activeF();
+ var gs=(d.groups||[]).filter(g=>!f||g.cat==f);
+ var ot=(d.other||[]).filter(x=>!f||x.cat==f);
+ box.innerHTML='';
+ if(!gs.length&&!ot.length){box.innerHTML='<div class=mut style="padding:10px 16px">该类型下没有结果，点掉类型看全部</div>';return;}
+ var wall=document.createElement('div');wall.className='wall';
+ var sel=document.createElement('div');sel.id='selres';
+ function pick(card,rs,label){
+  document.querySelectorAll('.pcard').forEach(c=>c.classList.remove('sel'));
+  card.classList.add('sel');sel.innerHTML='';
+  var hd=document.createElement('div');hd.className='gt';hd.style.padding='6px 16px 0';
+  hd.textContent=label+' — 选择站点下载';sel.appendChild(hd);
+  sel.appendChild(mkTable(rs));
+  sel.scrollIntoView({behavior:'smooth',block:'nearest'});
+ }
+ var CN={movie:'电影',tv:'剧集',anime:'动漫'};
+ gs.forEach(function(g){
+  var card=document.createElement('div');card.className='pcard';
+  if(g.poster){var im=document.createElement('img');im.className='pw';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(g.poster);card.appendChild(im);}
+  else{var ph=document.createElement('div');ph.className='ph';ph.textContent=g.cat=='anime'?'🎌':(g.mtype=='tv'?'📺':'🎬');card.appendChild(ph);}
+  var nm=document.createElement('div');nm.className='pname';nm.textContent=g.name+(g.year?' ('+g.year+')':'');card.appendChild(nm);
+  var mt=document.createElement('div');mt.className='pmeta';mt.textContent=(CN[g.cat]||CN[g.mtype])+' · '+g.results.length+' 个种 · 最高做种 '+(g.results[0]?g.results[0].seeders:0);card.appendChild(mt);
+  card.title=g.overview||'';
+  card.onclick=function(){pick(card,g.results,g.name+(g.year?' ('+g.year+')':''));};
+  wall.appendChild(card);
+ });
+ if(ot.length){
+  var card=document.createElement('div');card.className='pcard';
+  var ph=document.createElement('div');ph.className='ph';ph.textContent='🧩';card.appendChild(ph);
+  var nm=document.createElement('div');nm.className='pname';nm.textContent='未识别 / 其他';card.appendChild(nm);
+  var mt=document.createElement('div');mt.className='pmeta';mt.textContent=ot.length+' 个种';card.appendChild(mt);
+  card.onclick=function(){pick(card,ot,'未识别 / 其他');};
+  wall.appendChild(card);
+ }
+ box.appendChild(wall);box.appendChild(sel);
+}
 function doSearch(){
  var q=document.getElementById('q').value.trim();if(!q)return;
  clearTimeout(_t);
- var cats=Array.from(document.querySelectorAll('.fpill.on')).map(e=>e.dataset.c).join(',');
  var box=document.getElementById('sresult');
- box.innerHTML='<div class=mut style="padding:10px 16px">搜索中…（全站搜索+识别配图约 40~70 秒，稍候）</div>';
- fetch('/api/search?q='+encodeURIComponent(q)+(cats?'&cats='+cats:'')).then(r=>r.json()).then(function(d){
+ box.innerHTML='<div class=mut style="padding:10px 16px">搜索中…（全站搜索+识别配图约 40~70 秒；搜完点类型即时切换）</div>';
+ fetch('/api/search?q='+encodeURIComponent(q)).then(r=>r.json()).then(function(d){
   if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">搜索失败：'+(d.err||'')+'</div>';return;}
-  var gs=d.groups||[],ot=d.other||[];
-  if(!gs.length&&!ot.length){box.innerHTML='<div class=mut style="padding:10px 16px">没搜到结果，换个关键词试试</div>';return;}
-  box.innerHTML='';
-  var wall=document.createElement('div');wall.className='wall';
-  var sel=document.createElement('div');sel.id='selres';
-  function pick(card,g,label){
-   document.querySelectorAll('.pcard').forEach(c=>c.classList.remove('sel'));
-   card.classList.add('sel');sel.innerHTML='';
-   var hd=document.createElement('div');hd.className='gt';hd.style.padding='6px 16px 0';
-   hd.textContent=label+' — 选择站点下载';sel.appendChild(hd);
-   sel.appendChild(mkTable(g));
-   sel.scrollIntoView({behavior:'smooth',block:'nearest'});
-  }
-  gs.forEach(function(g){
-   var card=document.createElement('div');card.className='pcard';
-   if(g.poster){var im=document.createElement('img');im.className='pw';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(g.poster);card.appendChild(im);}
-   else{var ph=document.createElement('div');ph.className='ph';ph.textContent=g.mtype=='tv'?'📺':'🎬';card.appendChild(ph);}
-   var nm=document.createElement('div');nm.className='pname';nm.textContent=g.name+(g.year?' ('+g.year+')':'');card.appendChild(nm);
-   var mt=document.createElement('div');mt.className='pmeta';mt.textContent=(g.mtype=='tv'?'剧集':'电影')+' · '+g.results.length+' 个种';card.appendChild(mt);
-   card.title=g.overview||'';
-   card.onclick=function(){pick(card,g.results,g.name+(g.year?' ('+g.year+')':''));};
-   wall.appendChild(card);
-  });
-  if(ot.length){
-   var card=document.createElement('div');card.className='pcard';
-   var ph=document.createElement('div');ph.className='ph';ph.textContent='🧩';card.appendChild(ph);
-   var nm=document.createElement('div');nm.className='pname';nm.textContent='未识别 / 其他';card.appendChild(nm);
-   var mt=document.createElement('div');mt.className='pmeta';mt.textContent=ot.length+' 个种';card.appendChild(mt);
-   card.onclick=function(){pick(card,ot,'未识别 / 其他');};
-   wall.appendChild(card);
-  }
-  box.appendChild(wall);box.appendChild(sel);
+  if(!(d.groups||[]).length&&!(d.other||[]).length){box.innerHTML='<div class=mut style="padding:10px 16px">没搜到结果，换个关键词试试</div>';return;}
+  _sd=d;renderWall();
  }).catch(e=>{box.innerHTML='<div class=mut style="padding:10px 16px">搜索出错</div>';});
 }
 function dl(b,u){
@@ -1076,12 +1090,21 @@ class Handler(BaseHTTPRequestHandler):
             results = prowlarr_search(q, cats)
         except Exception as e:
             logmsg("WARN", f"搜索下载查询失败[{q}]: {e}"); s._send_json({"ok":False,"err":str(e)[:80]}); return
+        def catlab(r):
+            ids = [c.get("id", 0) for c in (r.get("categories") or [])]
+            if any(i == 5070 for i in ids): return "anime"
+            if any(2000 <= i < 3000 for i in ids): return "movie"
+            if any(5000 <= i < 6000 for i in ids): return "tv"
+            if any(3000 <= i < 4000 for i in ids): return "music"
+            if any(7000 <= i < 8000 for i in ids): return "book"
+            return ""
         out = []
         for r in results:
             url = r.get("downloadUrl") or r.get("guid") or ""
             if not url: continue
             out.append({"title": r.get("title",""), "site": r.get("indexer",""),
-                        "sizeh": human_size(r.get("size",0)), "seeders": r.get("seeders") or 0, "url": url})
+                        "sizeh": human_size(r.get("size",0)), "seeders": r.get("seeders") or 0,
+                        "url": url, "cat": catlab(r)})
         out.sort(key=lambda x: x["seeders"], reverse=True)
         out = out[:100]
         # 识别分组(MP式)：按提取词归并，最多对8个不同内容做 TMDB 识别，配海报好分辨
@@ -1103,6 +1126,7 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 gk = (m["mtype"], m["id"])
                 g = groups.setdefault(gk, {"name": m["tmdb_name"], "year": m["year"], "mtype": m["mtype"],
+                                           "cat": "anime" if m.get("anime") else m["mtype"],
                                            "poster": m.get("poster",""), "overview": (m.get("overview") or "")[:110],
                                            "results": []})
                 g["results"].append(x)
@@ -1116,7 +1140,8 @@ class Handler(BaseHTTPRequestHandler):
         for g in groups.values():
             g["results"] = seed_filter(g["results"])
         if other: other = seed_filter(other)
-        glist = sorted(groups.values(), key=lambda g: -len(g["results"]))
+        # 海报墙按最高做种数排(结果本身已按做种降序,首个即最高)
+        glist = sorted(groups.values(), key=lambda g: -(g["results"][0]["seeders"] if g["results"] else 0))
         s._send_json({"ok": True, "groups": glist, "other": other})
     def _poster(s):
         # 海报代理：TMDB 图片国内不通，走 TMDB_PROXY 抓取并缓存在 /config/posters
