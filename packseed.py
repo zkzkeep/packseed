@@ -545,6 +545,42 @@ def fetch_lyrics(files, root):
             continue
     return got
 
+def fetch_covers(files, root):
+    """给每个专辑文件夹落 cover.jpg(iTunes Search 免key,600x600)。Navidrome 优先读 cover.*"""
+    audio_ext = (".flac",".mp3",".ape",".wav",".m4a",".ogg",".wv")
+    albums = {}
+    for _s, rel in files:
+        if os.path.splitext(rel)[1].lower() in audio_ext:
+            albums.setdefault(os.path.dirname(rel), rel)
+    got = 0
+    for d in albums:
+        dstdir = os.path.join(root, d) if d else root
+        if any(os.path.exists(os.path.join(dstdir, c)) for c in ("cover.jpg","cover.png","folder.jpg","front.jpg","Cover.jpg")):
+            continue
+        album = os.path.basename(d) if d else ""
+        top = (d or "").split("/")[0]
+        m = re.match(r'^(.{1,24}?)\s*[-–]\s', top)
+        artist = m.group(1).strip() if m else ""
+        if not album: continue
+        try:
+            q = urllib.parse.urlencode({"term": f"{artist} {album}".strip(), "media": "music",
+                                        "entity": "album", "limit": 1, "country": "cn"})
+            r = json.load(urllib.request.urlopen("https://itunes.apple.com/search?" + q, timeout=15))
+            res = r.get("results") or []
+            if not res: continue
+            art = (res[0].get("artworkUrl100") or "").replace("100x100", "600x600")
+            if not art: continue
+            img = urllib.request.urlopen(art, timeout=20).read()
+            if len(img) > 5000:
+                p = os.path.join(dstdir, "cover.jpg")
+                open(p, "wb").write(img)
+                try: os.chown(p, int(os.environ.get("PUID","1000")), int(os.environ.get("PGID","1001")))
+                except Exception: pass
+                got += 1
+        except Exception:
+            continue
+    return got
+
 def organize_music(ih, name, files):
     """音乐入库：整个种子目录结构原样硬链接进 Navidrome 音乐库。
     不动文件名不拍平——tag 是 Navidrome 的事，歌词是 lrcapi 的事。"""
@@ -565,7 +601,8 @@ def organize_music(ih, name, files):
               (ih, name, "音乐", "music", None, name[:60], "", root, "music", "done", n, int(time.time())))
     c.commit(); c.close()
     lrc = fetch_lyrics(files, root)
-    logmsg("INFO", f"音乐入库 {name[:44]} | {n}个文件 + {lrc}首歌词 → {root} (Navidrome每小时自动扫)")
+    cov = fetch_covers(files, root)
+    logmsg("INFO", f"音乐入库 {name[:44]} | {n}个文件 + {lrc}首歌词 + {cov}张封面 → {root}")
     return root, n
 
 def emby_refresh():
