@@ -3182,6 +3182,12 @@ def main():
     threading.Thread(target=scanner, daemon=True).start()
     threading.Thread(target=qb_watcher, daemon=True).start()
     threading.Thread(target=notify_worker, daemon=True).start()
+    try:   # 保种队列有存货(上次重启打断的)则自动续跑
+        c = db(); nq = c.execute("SELECT COUNT(*) FROM keepseed WHERE status='queued'").fetchone()[0]; c.close()
+        if nq:
+            logmsg("INFO", f"保种队列续跑: 还有 {nq} 个排队")
+            threading.Thread(target=keepseed_worker, daemon=True).start()
+    except Exception: pass
     ThreadingHTTPServer(("0.0.0.0", CFG["PORT"]), Handler).serve_forever()
 
 if __name__ == "__main__":
