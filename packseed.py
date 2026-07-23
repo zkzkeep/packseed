@@ -460,6 +460,13 @@ def organize_files(files, m, cat):
             os.link(src, dst); n += 1
         except OSError as e:
             logmsg("WARN", f"硬链接失败 {os.path.basename(rel)}: {e}")
+    # 目录属主对齐媒体库惯例(PUID/PGID)，别让 Emby/其他工具因权限犯嘀咕
+    try:
+        uid, gid = int(os.environ.get("PUID", "1000")), int(os.environ.get("PGID", "1001"))
+        for root_, dirs, _fs in os.walk(dest_dir):
+            os.chown(root_, uid, gid)
+    except Exception:
+        pass
     return dest_dir, n
 
 def emby_refresh():
