@@ -361,8 +361,18 @@ def _tmdb_search(q, tv_only=False):
         return []
 def _ryear(r): return (r.get("release_date") or r.get("first_air_date") or "")[:4]
 
+_TMDB_CACHE = {}
 def tmdb_match(name):
-    """解析 name → 匹配 TMDB。返回 dict(mtype,id,tmdb_name,year,conf,q) 或 None"""
+    hit = _TMDB_CACHE.get(name)
+    if hit and time.time() - hit[1] < 21600:
+        return hit[0]
+    m = _tmdb_match_raw(name)
+    if len(_TMDB_CACHE) > 2000: _TMDB_CACHE.clear()
+    _TMDB_CACHE[name] = (m, time.time())
+    return m
+
+def _tmdb_match_raw(name):
+    """解析 name → 匹配 TMDB。返回 dict(mtype,id,tmdb_name,year,conf,q) 或 None。结果缓存6小时。"""
     if not CFG["TMDB_KEY"]: return None
     tc, te = _anime_title(name)          # 番组命名优先(动漫)
     if not (tc or te):
@@ -1148,15 +1158,48 @@ def search_group(q, results, log=lambda m: None):
     glist = sorted(groups.values(), key=lambda g: -(g["results"][0]["seeders"] if g["results"] else 0))
     return {"ok": True, "groups": glist, "other": other}
 
+def prowlarr_indexers():
+    req = urllib.request.Request(CFG["PROWLARR_URL"] + "/api/v1/indexer", headers={"X-Api-Key": CFG["PROWLARR_KEY"]})
+    return [i for i in json.load(urllib.request.urlopen(req, timeout=15)) if i.get("enable")]
+
+def prowlarr_search_fan(query, log=lambda m: None, per_timeout=25):
+    """MP式分站并发：每站独立请求+单站超时，快站先回、慢站丢弃，不再等最慢的站。"""
+    try:
+        idx = prowlarr_indexers()
+        if not idx: raise RuntimeError("无可用站点")
+    except Exception as e:
+        log(f"⚠️ 取站点列表失败({str(e)[:30]})，退回聚合搜索"); return prowlarr_search(query)
+    from concurrent.futures import ThreadPoolExecutor
+    results = []; lock = threading.Lock(); done = [0]; ok = [0]
+    def one(ix):
+        u = (CFG["PROWLARR_URL"] + "/api/v1/search?query=" + urllib.parse.quote(query)
+             + "&type=search&indexerIds=" + str(ix["id"]))
+        req = urllib.request.Request(u, headers={"X-Api-Key": CFG["PROWLARR_KEY"]})
+        try:
+            r = json.load(urllib.request.urlopen(req, timeout=per_timeout))
+            with lock:
+                done[0] += 1
+                if r:
+                    ok[0] += 1; results.extend(r)
+                    log(f"  ✓ {ix.get('name','?')} 返回 {len(r)} 条 · 进度 {done[0]}/{len(idx)}")
+        except Exception:
+            with lock:
+                done[0] += 1
+                log(f"  ✗ {ix.get('name','?')} 超时/失败，跳过 · 进度 {done[0]}/{len(idx)}")
+    with ThreadPoolExecutor(max_workers=32) as ex:
+        list(ex.map(one, idx))
+    log(f"📦 {ok[0]}/{len(idx)} 个站点有结果，共 {len(results)} 条")
+    return results
+
 _SJOBS = {}
 def _sjob_run(jid, q):
     job = _SJOBS[jid]
     def log(m): job["log"].append(m)
     try:
-        log(f"🚀 已提交「{q}」→ Prowlarr 全站并发查询(约 30~60 秒,站点越慢的越拖后腿)…")
+        log(f"🚀 已提交「{q}」→ 分站并发搜索(单站超时25秒,慢站直接跳过)…")
         t0 = time.time()
-        results = prowlarr_search(q)
-        log(f"📦 站点返回 {len(results)} 条,耗时 {int(time.time()-t0)} 秒。做种数过滤 + TMDB 识别配图…")
+        results = prowlarr_search_fan(q, log)
+        log(f"⏱ 搜索耗时 {int(time.time()-t0)} 秒。做种数过滤 + TMDB 识别配图…")
         job["result"] = search_group(q, results, log)
         log("✅ 完成")
     except Exception as e:
