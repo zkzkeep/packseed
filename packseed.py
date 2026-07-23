@@ -1559,11 +1559,10 @@ a{color:var(--accL);text-decoration:none}
 .dtt{font-size:14px;font-weight:600;letter-spacing:-.01em}.dtt .mut{font-weight:400;font-size:12px}
 .hero{position:relative;border-radius:22px;overflow:hidden;text-align:center;padding:64px 20px 46px;margin-bottom:20px;
 background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba(255,255,255,.18)}
-.hero::before{content:'';position:absolute;inset:-10%;background:url('/api/bg') center 42%/cover no-repeat;
-animation:seadrift 14s ease-in-out infinite alternate;z-index:0}
+.herovid{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}
 .hero::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,25,95,.30) 0%,rgba(0,47,167,.55) 62%,rgba(0,47,167,.92) 100%);z-index:1}
 .hero>*{position:relative;z-index:2}
-@keyframes seadrift{0%{transform:scale(1.06) translate(-3%,-1.5%)}50%{transform:scale(1.16) translate(0.5%,1.2%)}100%{transform:scale(1.08) translate(3%,-0.8%)}}
+
 .herotitle{font-size:30px;font-weight:800;letter-spacing:-.02em;margin-bottom:22px;text-shadow:0 3px 18px rgba(0,10,60,.55)}
 .herotitle .mut{font-weight:500;font-size:14px;color:rgba(255,255,255,.82)}
 .hero .searchbar{max-width:780px;margin:0 auto;padding:0}
@@ -1604,6 +1603,7 @@ animation:seadrift 14s ease-in-out infinite alternate;z-index:0}
 </div>
 <div id=tab-search class=tab>
 <div class=hero>
+<video class=herovid autoplay muted loop playsinline poster="/api/bg" src="/api/bgv"></video>
 <div class=herotitle>今晚观什么澜?<div class=mut style="margin-top:6px">全站搜索 · 海报点选 · 一键下载,剩下的交给流水线</div></div>
 <div class=searchbar><input id=q placeholder="片名 / 剧名 / 专辑,回车即搜" onkeydown="if(event.key=='Enter')doSearch()"><button onclick=doSearch()>搜索</button></div>
 <div class=fbar>
@@ -2162,6 +2162,8 @@ class Handler(BaseHTTPRequestHandler):
             s._wecom_get(); return
         if s.path.startswith("/api/poster"):
             s._poster(); return          # 公开海报,免登录(图文通知的图要外网可达)
+        if s.path.startswith("/api/bgv"):
+            s._bgv(); return             # 海浪视频背景,免登录
         if s.path.startswith("/api/bg"):
             s._bg(); return              # 首页海浪背景图,免登录
         if s.path.startswith("/favicon"):
@@ -2457,6 +2459,26 @@ class Handler(BaseHTTPRequestHandler):
                                 "status": r[4], "ts": time.strftime("%m-%d %H:%M", time.localtime(r[5] or 0))})
         c.close()
         s._send_json(out)
+    def _bgv(s):
+        p = os.path.join(os.path.dirname(CFG["DB"]), "wave.mp4")
+        if not os.path.exists(p):
+            s.send_response(404); s.end_headers(); return
+        size = os.path.getsize(p)
+        rng = s.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            a, _, b = rng[6:].partition("-")
+            start = int(a or 0); end = min(int(b) if b else size - 1, size - 1)
+            s.send_response(206)
+            s.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        else:
+            start, end = 0, size - 1
+            s.send_response(200)
+        length = end - start + 1
+        s.send_header("Content-Type", "video/mp4"); s.send_header("Accept-Ranges", "bytes")
+        s.send_header("Cache-Control", "max-age=604800"); s.send_header("Content-Length", str(length))
+        s.end_headers()
+        with open(p, "rb") as f:
+            f.seek(start); s.wfile.write(f.read(length))
     def _bg(s):
         p = os.path.join(os.path.dirname(CFG["DB"]), "wave.jpg")
         if not os.path.exists(p):
