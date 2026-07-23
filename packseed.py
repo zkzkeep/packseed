@@ -1569,7 +1569,7 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 .hero .fbar{justify-content:center;padding:18px 0 0}
 #sresult:not(:empty){background:var(--card);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:20px;margin-bottom:20px;overflow:hidden}
 .recentcard{overflow:hidden}
-.rflow{overflow:hidden;padding:44px 0 30px;-webkit-mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent);mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent)}
+.rflow{overflow:hidden;padding:56px 0 36px;-webkit-mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent);mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent)}
 .rtrack{display:flex;gap:14px;width:max-content;padding:0 20px;will-change:transform}
 @keyframes bob{from{transform:translateY(-4px) rotate(-.5deg)}to{transform:translateY(4px) rotate(.5deg)}}
 .rbob{animation:bob 4.2s ease-in-out infinite alternate}
@@ -1717,8 +1717,8 @@ function dockify(el){
    var c=cards[i],r=c.getBoundingClientRect();
    var d=Math.abs(mx-(r.left+r.width/2));
    var t=Math.max(0,1-d/260);        // 磁场半径260px
-   t=t*t;                             // 平方衰减: 越近隆起越陡,远处几乎不动
-   var s=1+0.22*t, y=-8*t;
+   t=t*t;                             // 平方衰减: 越近隆起越陡
+   var s=0.94+(1.30-0.94)*t, y=-10*t; // 众星捧月: 正主1.30,远处集体退到0.94衬托
    c.style.transform='scale('+s.toFixed(3)+') translateY('+y.toFixed(1)+'px)';
    c.style.zIndex=t>0.4?2:1;
   }
