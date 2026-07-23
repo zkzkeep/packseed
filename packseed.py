@@ -1893,7 +1893,7 @@ function pollDl(){
  }).catch(()=>{});
 }
 /* ===== 批量保种 / 缺种报告 / 转种资料包 ===== */
-var _ksItems=[],_ksOff=0,_ksInited=false;
+var _ksItems=[],_ksPage=0,_ksInited=false;
 function ksInit(){
  ksStatus();
  if(_ksInited)return;_ksInited=true;
@@ -1906,17 +1906,16 @@ function ksInit(){
 function ksFetch(more,btn){
  var ix=document.getElementById('ks-ix').value;
  if(!ix){toast('先选站点');return;}
- if(!more){_ksItems=[];_ksOff=0;}
+ _ksPage=more?_ksPage+1:0;
  if(btn){btn.disabled=true;btn.dataset.t=btn.textContent;btn.textContent='拉取中…';}
  var q=encodeURIComponent(document.getElementById('ks-q').value.trim());
- fetch('/api/ks/list?ix='+ix+'&q='+q+'&offset='+_ksOff).then(r=>r.json()).then(function(d){
+ fetch('/api/ks/list?ix='+ix+'&q='+q+'&page='+_ksPage).then(r=>r.json()).then(function(d){
   if(btn){btn.disabled=false;btn.textContent=btn.dataset.t;}
-  if(!d.ok){toast('拉取失败: '+(d.err||''));return;}
-  var seen={};_ksItems.forEach(x=>seen[x.url]=1);
-  d.items.forEach(function(x){if(!seen[x.url])_ksItems.push(x);});
-  _ksOff+=100;ksRender();
-  toast('本次+'+d.items.length+'条,累计'+_ksItems.length+'条');
- }).catch(function(){if(btn){btn.disabled=false;btn.textContent=btn.dataset.t;}toast('拉取失败');});
+  if(!d.ok){toast('拉取失败: '+(d.err||''));if(more)_ksPage--;return;}
+  if(!d.items.length){toast('第'+(_ksPage+1)+'页没有种子了,真到底了');if(more)_ksPage--;return;}
+  _ksItems=d.items;ksRender();   // 每次整页替换:勾选→推送→翻下一页,循环
+  toast('第'+(_ksPage+1)+'页: '+d.items.length+'条');
+ }).catch(function(){if(btn){btn.disabled=false;btn.textContent=btn.dataset.t;}toast('拉取失败');if(more)_ksPage--;});
 }
 function ksFiltered(){
  var mg=parseFloat(document.getElementById('ks-fsize').value)||0;
@@ -1943,12 +1942,12 @@ function ksRender(){
 function ksAll(){document.querySelectorAll('.kscb').forEach(c=>c.checked=true);}
 function ksPush(btn){
  var picks=[];
- document.querySelectorAll('.kscb:checked').forEach(function(c){var x=_ksItems[parseInt(c.dataset.i)];if(x)picks.push({name:x.name,size:x.size,url:x.url,indexer:''});});
+ document.querySelectorAll('.kscb:checked').forEach(function(c){var x=_ksItems[parseInt(c.dataset.i)];if(x)picks.push({name:x.name,size:x.size,url:x.url});});
  if(!picks.length){toast('先勾选种子');return;}
  var tot=picks.reduce((a,b)=>a+b.size,0);
  if(!confirm('推送 '+picks.length+' 个种子进保种队列,共约 '+(tot/1073741824).toFixed(1)+' GB。确定?'))return;
  btn.disabled=true;
- fetch('/api/ks/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:picks})})
+ fetch('/api/ks/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ix:document.getElementById('ks-ix').value,items:picks})})
  .then(r=>r.json()).then(function(d){btn.disabled=false;toast(d.ok?('已入队 '+d.n+' 个,后台逐个拉取'):'失败');ksStatus();})
  .catch(function(){btn.disabled=false;toast('失败');});
 }
@@ -2480,6 +2479,69 @@ def prowlarr_browse(ixid, query="", offset=0, limit=100):
     req = urllib.request.Request(u, headers={"X-Api-Key": CFG["PROWLARR_KEY"]})
     return json.load(urllib.request.urlopen(req, timeout=60))
 
+# ---- 直连站点扒列表页:Prowlarr 搜索接口大多不支持翻页(实测第2页返回0条),整站保种只能自己来 ----
+_SITE_CACHE = {}
+def site_conn(ixid):
+    """从 Prowlarr 索引器配置里拿站点 baseUrl + Cookie(缓存10分钟)"""
+    ixid = int(ixid)
+    hit = _SITE_CACHE.get(ixid)
+    if hit and time.time() - hit[2] < 600: return hit[0], hit[1]
+    req = urllib.request.Request(CFG["PROWLARR_URL"] + f"/api/v1/indexer/{ixid}",
+                                 headers={"X-Api-Key": CFG["PROWLARR_KEY"]})
+    d = json.load(urllib.request.urlopen(req, timeout=15))
+    base = (d.get("indexerUrls") or [""])[0].rstrip("/")
+    ck = next((f.get("value") for f in d.get("fields", [])
+               if "cookie" in (f.get("name") or "").lower() and f.get("value")), "")
+    _SITE_CACHE[ixid] = (base, ck, time.time())
+    return base, ck
+
+_NEXUS_ROW = re.compile(r'<a\s[^>]*?title="([^"]+)"[^>]*?href="details\.php\?id=(\d+)')     # title在前(空格数不定)
+_NEXUS_ROW2 = re.compile(r'<a\s[^>]*?href="details\.php\?id=(\d+)[^"]*"[^>]*?title="([^"]+)"')  # href在前的站
+_NEXUS_UNIT = {"KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+def nexus_browse(ixid, page):
+    """扒 NexusPHP 站 torrents.php 第 page 页(0起),解析标题/体积/做种数/下载链接"""
+    import html as _html
+    base, ck = site_conn(ixid)
+    if not base or not ck: raise RuntimeError("该站在Prowlarr里没有Cookie")
+    req = urllib.request.Request(f"{base}/torrents.php?page={int(page)}&incldead=1",
+                                 headers={"Cookie": ck, "User-Agent": "Mozilla/5.0"})
+    h = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
+    if "login.php" in h[:3000] and "logout" not in h: raise RuntimeError("Cookie失效,去Prowlarr更新")
+    ms = [(m, m.group(1), m.group(2)) for m in _NEXUS_ROW.finditer(h)]
+    if not ms:
+        ms = [(m, m.group(2), m.group(1)) for m in _NEXUS_ROW2.finditer(h)]
+    items = []
+    for k, (m, title, tid) in enumerate(ms):
+        seg = h[m.end(): ms[k+1][0].start() if k+1 < len(ms) else m.end()+6000]
+        if f"download.php?id={tid}" not in seg: continue   # 不是种子行(公告等)
+        sz = sd = 0; dt = ""
+        sm = re.search(r'>([\d.]+)<br ?/?>\s*(TB|GB|MB|KB)<', seg)
+        if sm: sz = int(float(sm.group(1)) * _NEXUS_UNIT[sm.group(2)])
+        dm = re.search(r'#seeders">(?:<b>)?(\d+)', seg)
+        if dm: sd = int(dm.group(1))
+        tm = re.search(r'<span title="(\d{4}-\d{2}-\d{2})', seg)
+        if tm: dt = tm.group(1)
+        items.append({"title": _html.unescape(title), "size": sz, "seeders": sd,
+                      "downloadUrl": f"{base}/download.php?id={tid}", "publishDate": dt})
+    return items
+
+def ks_browse(ixid, query, page):
+    """保种列表统一入口:无关键词→直连扒页(真分页);有关键词/直连失败→Prowlarr搜索兜底"""
+    if not query:
+        try: return nexus_browse(ixid, page)
+        except Exception as e:
+            if page > 0: raise                     # 深页只有直连能给,失败就明说
+            logmsg("WARN", f"直连扒页失败({str(e)[:36]}),回退Prowlarr")
+    return prowlarr_browse(ixid, query, page * 100)
+
+def ks_download(url, ixid):
+    """下载种子:站点直链带Cookie,Prowlarr代理链走APIKey"""
+    if "download.php" in url and ixid:
+        base, ck = site_conn(ixid)
+        req = urllib.request.Request(url, headers={"Cookie": ck, "User-Agent": "Mozilla/5.0"})
+        return urllib.request.urlopen(req, timeout=60).read()
+    return prowlarr_download(url)
+
 _KS = {"running": False, "stop": False, "msg": "", "cur": ""}
 def keepseed_worker():
     """批量保种执行器:逐个下载种子推 qb,节流 + 磁盘水位保护"""
@@ -2495,7 +2557,7 @@ def keepseed_worker():
             rid, name, size, url, ix = row
             _KS["cur"] = name[:48]
             try:
-                data = prowlarr_download(url)
+                data = ks_download(url, int(ix) if str(ix).isdigit() else 0)
                 if data[:1] != b'd': raise RuntimeError("非种子文件")
                 res = QB().add(data, category="保种", tags="packseed,keepseed", savepath=CFG["KEEP_DIR"])
                 st, err = ("pushed", "") if "Ok" in res else ("error", (res.strip()[:40] or "qb拒绝"))
@@ -2519,10 +2581,10 @@ def ks_autofill(ixid, query, target_gb, max_gb, max_seed):
         try: have |= {(t["name"], t["totalSize"]) for t in TR().torrents()}
         except Exception: pass
         total = added = 0; target = target_gb * 2**30; seen_urls = set()
-        for page in range(80):            # 最多80页兜底,防站点不支持深翻页时空转
+        for page in range(400):           # 页数兜底,防意外空转
             if _KSF["stop"]: _KSF["msg"] = f"⏹ 已停止:入队{added}个 {human_size(total)}"; break
             try:
-                rs = prowlarr_browse(ixid, query, page * 100)
+                rs = ks_browse(ixid, query, page)
             except Exception as e:
                 _KSF["msg"] = f"⚠️ 第{page+1}页拉取失败({str(e)[:36]}),已入队{added}个 {human_size(total)}"; break
             newu = [r for r in rs if r.get("downloadUrl") and r["downloadUrl"] not in seen_urls]
@@ -2538,7 +2600,7 @@ def ks_autofill(ixid, query, target_gb, max_gb, max_seed):
                 if (nm, sz) in have: continue       # 队列里有过/tr已做种,不重复下
                 have.add((nm, sz))
                 c.execute("INSERT INTO keepseed(name,size,url,indexer,status,err,ts) VALUES(?,?,?,?,?,?,?)",
-                          (nm, sz, r["downloadUrl"], "", "queued", "", int(time.time())))
+                          (nm, sz, r["downloadUrl"], str(ixid), "queued", "", int(time.time())))
                 total += sz; added += 1
                 if total >= target: break
             c.commit(); c.close()
@@ -3081,7 +3143,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if act == "list":
             try:
-                rs = prowlarr_browse(q_.get("ix", ["0"])[0], (q_.get("q", [""])[0]).strip(), int(q_.get("offset", ["0"])[0]))
+                rs = ks_browse(int(q_.get("ix", ["0"])[0]), (q_.get("q", [""])[0]).strip(), int(q_.get("page", ["0"])[0]))
                 items = [{"name": r.get("title") or "", "size": r.get("size") or 0, "sizeh": human_size(r.get("size") or 0),
                           "seeders": r.get("seeders", 0), "url": r.get("downloadUrl") or "",
                           "date": (r.get("publishDate") or "")[:10], "noxfer": noxfer(r.get("title") or "")}
@@ -3131,6 +3193,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             body = {}
         items = body.get("items") or []
+        ix = str(body.get("ix") or "")
         n = 0
         c = db()
         have = {(r[0], r[1]) for r in c.execute("SELECT name,size FROM keepseed WHERE status IN ('queued','pushed','done')").fetchall()}
@@ -3140,7 +3203,7 @@ class Handler(BaseHTTPRequestHandler):
             have.add((it.get("name") or "", it.get("size") or 0))
             # 注意:禁转种照样可以保种(只是不能转出去),不拦队列;禁转红线在转种助手里守
             c.execute("INSERT INTO keepseed(name,size,url,indexer,status,err,ts) VALUES(?,?,?,?,?,?,?)",
-                      (it.get("name") or "", it.get("size") or 0, it["url"], it.get("indexer") or "", "queued", "", int(time.time())))
+                      (it.get("name") or "", it.get("size") or 0, it["url"], ix, "queued", "", int(time.time())))
             n += 1
         c.commit(); c.close()
         if n and not _KS["running"]:
