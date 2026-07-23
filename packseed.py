@@ -29,7 +29,7 @@ CFG = {
     "QB_PASS":      os.environ.get("QB_PASS", ""),
     "QB_CATEGORY":  os.environ.get("QB_CATEGORY", ""),     # 兜底分类，留空则按识别的类型(电影/电视剧/动漫)
     "MIN_SEEDERS":  int(os.environ.get("MIN_SEEDERS", "20")),  # 搜索结果做种数门槛;整体都低时保留前20%
-    "TR_BAN_SITES": os.environ.get("TR_BAN_SITES", "hhanclub,hd dolby,hddolby,tjupt,北洋园"),  # ban了tr客户端的站,不注入
+    "TR_BAN_SITES": os.environ.get("TR_BAN_SITES", ""),   # ban了tr客户端的站(tr3.00全站通行,默认空)
     # —— 整理器（识别+刮削入库）——
     "TMDB_KEY":     os.environ.get("TMDB_KEY", ""),
     "TMDB_PROXY":   os.environ.get("TMDB_PROXY", ""),      # TMDB 走代理(国内需要)，如 http://x:7890
@@ -115,13 +115,19 @@ def torrent_announces(data):
     return [a for a in dict.fromkeys(anns) if a]
 
 def tr_add_trackers(tr, tid, anns):
-    """给现有种子追加 tracker(tr 4.x trackerList 全量覆盖,严格去重防 Invalid)"""
-    cur = tr.call("torrent-get", {"ids": [tid], "fields": ["trackerList"]})["arguments"]["torrents"][0].get("trackerList", "")
-    have = {l.strip() for l in cur.splitlines() if l.strip()}
-    new = [a for a in anns if a not in have]
+    """给现有种子追加 tracker。tr3 用 trackerAdd;tr4 废弃了它,失败则 trackerList 全量覆盖。
+    按主机名去重: 同站不同 authkey 不算新 tracker(重复汇报同站有连坐风险)"""
+    curt = tr.call("torrent-get", {"ids": [tid], "fields": ["trackers"]})["arguments"]["torrents"][0].get("trackers", [])
+    have = [u.get("announce", "") for u in curt]
+    def host(a):
+        try: return urllib.parse.urlparse(a).hostname or a
+        except Exception: return a
+    have_hosts = {host(a) for a in have}
+    new = [a for a in anns if a and host(a) not in have_hosts]
     if not new: return "duplicate"
-    tiers = [t.strip() for t in cur.split("\n\n") if t.strip()] + new
-    r2 = tr.call("torrent-set", {"ids": [tid], "trackerList": "\n\n".join(tiers)})
+    r2 = tr.call("torrent-set", {"ids": [tid], "trackerAdd": new})
+    if r2.get("result") != "success":
+        r2 = tr.call("torrent-set", {"ids": [tid], "trackerList": "\n\n".join([h for h in have if h] + new)})
     return "tracker" if r2.get("result") == "success" else "duplicate"
 
 def bdecode(data):
@@ -974,7 +980,15 @@ def run_match(tr, t, queries, manual=False, pre_results=None):
                 try:
                     resp = tr.add(data, dl_dir); rr = resp.get("result"); args = resp.get("arguments", {})
                     # 注意：tr 对"新增"和"内容已存在"都返回 result=success，靠 arguments 里的键区分
-                    if "torrent-duplicate" in args: res = "duplicate"
+                    if "torrent-duplicate" in args:
+                        # 同 info_hash(多站同一种子文件) → IYUU式: 给现有种子加新站tracker
+                        res = "duplicate"; dup = args["torrent-duplicate"]
+                        try:
+                            if dup.get("id") is not None:
+                                if tr_add_trackers(tr, dup["id"], torrent_announces(data)) == "tracker":
+                                    inj += 1; res = "tracker"
+                        except Exception as e:
+                            logmsg("WARN", f"加tracker失败: {str(e)[:40]}")
                     elif "torrent-added" in args or rr == "success": inj += 1; res = "injected"
                     else: res = "inject_fail:"+str(rr)
                 except Exception: res = "inject_err"
