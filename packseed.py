@@ -1095,6 +1095,40 @@ def scrape_pack(dest, m):
                 if vids[0] != nn and not os.path.exists(os.path.join(dest, nn)):
                     os.rename(os.path.join(dest, vids[0]), os.path.join(dest, nn))
 
+def emby_pin(dest, tid, name, mtype):
+    """入库后把 Emby 条目身份钉死(正确tmdbid+锁名)。
+    Emby 的 NFO 读取和自动刮削都不可靠,干脆由流水线直接写入身份——它只负责播放。"""
+    if not (CFG["EMBY_URL"] and CFG["EMBY_KEY"] and tid): return
+    try:
+        E = CFG["EMBY_URL"].rstrip("/") + "/emby"; k = CFG["EMBY_KEY"]
+        def _g(p): return json.load(urllib.request.urlopen(E+p+("&" if "?" in p else "?")+"api_key="+k, timeout=20))
+        def _p(p, body):
+            req = urllib.request.Request(E+p+("&" if "?" in p else "?")+"api_key="+k,
+                data=json.dumps(body).encode(), headers={"Content-Type":"application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=30)
+        it = None
+        for _ in range(6):                     # 最多等6分钟让 Emby 扫到新条目
+            time.sleep(60)
+            t_ = "Series" if mtype == "tv" else "Movie"
+            d = _g(f"/Items?IncludeItemTypes={t_}&Recursive=true&Fields=Path,ProviderIds")
+            it = next((x for x in d.get("Items", []) if (x.get("Path") or "") == dest
+                       or (x.get("Path") or "").startswith(dest + "/")), None)
+            if it: break
+        if not it:
+            logmsg("WARN", f"Emby钉身份: 6分钟没扫到 {name},下次刷新自愈"); return
+        if str((it.get("ProviderIds") or {}).get("Tmdb", "")) == str(tid) and it.get("Name") == name:
+            return                              # 已正确,不折腾
+        uid = _g("/Users?")[0]["Id"]
+        dto = _g(f"/Users/{uid}/Items/{it['Id']}?")
+        dto["Name"] = name; dto["ForcedSortName"] = name
+        dto["ProviderIds"] = {"Tmdb": str(tid)}
+        dto["LockedFields"] = ["Name"]
+        _p(f"/Items/{it['Id']}", dto)
+        _p(f"/Items/{it['Id']}/Refresh?Recursive=true&MetadataRefreshMode=FullRefresh&ImageRefreshMode=Default&ReplaceAllMetadata=true&ReplaceAllImages=false", {})
+        logmsg("INFO", f"📌 Emby 身份已钉死: {name} (tmdb {tid})")
+    except Exception as e:
+        logmsg("WARN", f"Emby钉身份失败 {name[:20]}: {str(e)[:40]}")
+
 def emby_refresh():
     if not (CFG["EMBY_URL"] and CFG["EMBY_KEY"]): return
     try:
@@ -1120,6 +1154,7 @@ def do_organize(ih, name, files, m, cat):
     c = db(); c.execute("UPDATE media SET target=?, files=?, status='done' WHERE info_hash=?", (dest, n, ih)); c.commit(); c.close()
     logmsg("INFO", f"入库 {m['tmdb_name']} ({m['year']}) ← {name[:36]} | {n}个文件 → {dest}")
     emby_refresh()
+    threading.Thread(target=emby_pin, args=(dest, m["id"], m["tmdb_name"], m["mtype"]), daemon=True).start()
     pic = poster_url(m.get("poster") or "")
     if pic:
         notify_news([{"title": f"📥 已入库 · {m['tmdb_name']} ({m['year']})",
