@@ -1564,7 +1564,21 @@ background-color:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px soli
 .hero .searchbar{max-width:780px;margin:0 auto;padding:0}
 .hero .fbar{justify-content:center;padding:18px 0 0}
 #sresult:not(:empty){background:var(--card);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:20px;margin-bottom:20px;overflow:hidden}
-.rstrip{display:flex;gap:14px;padding:22px 20px 26px;overflow-x:auto;scrollbar-width:thin}
+.recentcard{overflow:visible}
+.rstrip{display:flex;gap:14px;padding:30px 20px 24px;overflow:visible}
+@keyframes bob{from{transform:translateY(-4px) rotate(-.5deg)}to{transform:translateY(4px) rotate(.5deg)}}
+.rbob{animation:bob 4.2s ease-in-out infinite alternate}
+.rcard:nth-child(2n) .rbob{animation-duration:5.1s;animation-delay:-1.7s}
+.rcard:nth-child(3n) .rbob{animation-duration:4.6s;animation-delay:-2.9s}
+.rcard:nth-child(5n) .rbob{animation-duration:5.6s;animation-delay:-.8s}
+#im-ov{position:fixed;inset:0;background:rgba(0,18,70,.55);backdrop-filter:blur(8px);z-index:50;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:.25s}
+#im-ov.show{opacity:1;pointer-events:auto}
+#im-box{display:flex;gap:22px;max-width:640px;margin:20px;background:rgba(255,255,255,.16);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,.3);border-radius:22px;padding:24px;box-shadow:0 30px 80px rgba(0,10,60,.6);transform:translateY(12px) scale(.97);transition:.25s cubic-bezier(.2,.8,.3,1)}
+#im-ov.show #im-box{transform:none}
+#im-box img{width:170px;aspect-ratio:2/3;object-fit:cover;border-radius:14px;box-shadow:0 10px 30px rgba(0,10,60,.5);flex-shrink:0}
+#im-t{font-size:19px;font-weight:800;margin-bottom:8px}
+#im-p{font-size:13px;line-height:1.75;color:rgba(255,255,255,.88);max-height:220px;overflow-y:auto}
+#im-a{display:inline-block;margin-top:14px;background:#fff;color:var(--ikb);font-weight:800;border-radius:980px;padding:8px 22px;font-size:13px}
 .rcard{flex:0 0 108px;position:relative;transition:transform .45s cubic-bezier(.22,.9,.32,1);transform-origin:center 78%;will-change:transform}
 .rcard img{width:108px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--card2);box-shadow:0 5px 16px rgba(0,10,60,.5);display:block}
 .rname{font-size:12px;font-weight:600;margin-top:7px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -1601,7 +1615,8 @@ background-color:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px soli
 <div class=stat><div class=n id=d-media>—</div><div class=l id=d-medial>媒体库</div></div>
 <div class=stat><div class=n style=color:var(--pop) id=d-seed>—</div><div class=l id=d-seedl>做种中</div></div>
 </div>
-<div class=card><h2>🎬 最近入库</h2><div class=rstrip>{{RECENT}}</div></div>
+<div class="card recentcard"><h2>🎬 最近入库</h2><div class=rstrip>{{RECENT}}</div></div>
+<div id=im-ov onclick="this.classList.remove('show')"><div id=im-box onclick="event.stopPropagation()"><img id=im-img><div><div id=im-t></div><div id=im-p></div><a id=im-a target=_blank>在 Emby 中打开 →</a></div></div></div>
 </div>
 <div id=tab-media class=tab>
 <div class=card><h2>📥 整理入库 <span class=mut style=font-weight:400>· 下载完成自动识别→硬链接进 Emby 媒体库 · 待确认的可手动填 TMDB id/片名</span></h2><table><tr><th>下载名</th><th>分类</th><th>识别为</th><th>状态</th><th>目标/操作</th></tr>{{MEDIA}}</table></div>
@@ -1709,6 +1724,26 @@ function dockify(el){
  });
 }
 dockify(document.querySelector('.rstrip'));
+function trimStrip(){
+ var el=document.querySelector('.rstrip');if(!el)return;
+ var w=el.clientWidth-40, per=108+14, n=Math.max(3,Math.floor((w+14)/per));
+ for(var i=0;i<el.children.length;i++){el.children[i].style.display=i<n?'':'none';}
+}
+trimStrip();window.addEventListener('resize',trimStrip);
+(function(){
+ var el=document.querySelector('.rstrip');if(!el)return;
+ el.addEventListener('click',function(e){
+  var c=e.target.closest('.rcard');if(!c||!c.dataset.tid||c.dataset.tid=='0')return;
+  fetch('/api/overview?mt='+c.dataset.mt+'&id='+c.dataset.tid).then(r=>r.json()).then(function(d){
+   if(!d.ok)return;
+   document.getElementById('im-img').src=d.poster?('/api/poster?p='+encodeURIComponent(d.poster)):'';
+   document.getElementById('im-t').textContent=d.name+(d.year?' ('+d.year+')':'');
+   document.getElementById('im-p').textContent=d.overview;
+   document.getElementById('im-a').href='{{EMBYPUB}}/web/index.html#!/search?query='+encodeURIComponent(d.name);
+   document.getElementById('im-ov').classList.add('show');
+  });
+ });
+})();
 function fmtB(n,s){n=n||0;var u=['B','KB','MB','GB','TB'];var i=0;while(n>=1024&&i<4){n/=1024;i++}return n.toFixed(n>=100||i==0?0:1)+u[i]+(s||'');}
 function pollDash(){
  fetch('/api/dashboard').then(r=>r.json()).then(function(d){
@@ -2120,6 +2155,8 @@ class Handler(BaseHTTPRequestHandler):
             s._reid(); return
         if s.path.startswith("/api/poster"):
             s._poster(); return
+        if s.path.startswith("/api/overview"):
+            s._overview(); return
         if s.path.startswith("/api/dashboard"):
             s._dashboard(); return
         if s.path.startswith("/api/downloads"):
@@ -2162,9 +2199,10 @@ class Handler(BaseHTTPRequestHandler):
                            f"<td>{esc((tn+' ('+(yr or '')+')') if tn else '—')}</td>"
                            f"<td><span class='b {cls}'>{esc(lbl)}</span></td><td>{fix}</td></tr>")
         recent = ""
-        for r in c.execute("SELECT tmdb_name,year,poster FROM media WHERE status='done' AND poster IS NOT NULL AND poster != '' ORDER BY ts DESC LIMIT 14").fetchall():
-            recent += (f"<div class=rcard><img loading=lazy src='/api/poster?p={urllib.parse.quote(r[2])}'>"
-                       f"<div class=rname>{esc(r[0])}</div><div class=ryear>{esc(r[1] or '')}</div></div>")
+        for r in c.execute("SELECT tmdb_name,year,poster,mtype,tmdbid FROM media WHERE status='done' AND poster IS NOT NULL AND poster != '' ORDER BY ts DESC LIMIT 14").fetchall():
+            recent += (f"<div class=rcard data-mt='{esc(r[3] or 'tv')}' data-tid='{r[4] or 0}'><div class=rbob>"
+                       f"<img loading=lazy src='/api/poster?p={urllib.parse.quote(r[2])}'>"
+                       f"<div class=rname>{esc(r[0])}</div><div class=ryear>{esc(r[1] or '')}</div></div></div>")
         logs = ""
         for r in c.execute("SELECT ts,level,msg FROM log ORDER BY id DESC LIMIT 40").fetchall():
             logs += f"<tr><td class=mut>{time.strftime('%m-%d %H:%M:%S', time.localtime(r[0]))}</td><td>{esc(r[2])}</td></tr>"
@@ -2175,6 +2213,7 @@ class Handler(BaseHTTPRequestHandler):
                     .replace("{{ROWS}}", rows or "<tr><td colspan=6 class=mut>暂无记录，等待首次扫描…</td></tr>")
                     .replace("{{MEDIA}}", media_rows or "<tr><td colspan=5 class=mut>暂无入库记录</td></tr>")
                     .replace("{{RECENT}}", recent or "<div class=mut style='padding:4px 0 8px'>还没有带海报的入库记录,下一部片就有了</div>")
+                    .replace("{{EMBYPUB}}", os.environ.get("EMBY_PUBLIC", "https://emby.leesy.cc"))
                     .replace("{{LOGS}}", logs or "<tr><td colspan=2 class=mut>—</td></tr>"))
         b = html.encode("utf-8")
         s.send_response(200); s.send_header("Content-Type","text/html; charset=utf-8")
@@ -2297,6 +2336,16 @@ class Handler(BaseHTTPRequestHandler):
             s._send_json({"ok":True})
         except Exception as e:
             s._send_json({"ok":False,"err":str(e)[:60]})
+    def _overview(s):
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(s.path).query)
+        mt = (qs.get("mt", ["tv"])[0]) or "tv"; tid = (qs.get("id", ["0"])[0])
+        if not tid.isdigit() or tid == "0": s._send_json({"ok": False}); return
+        d = tmdb_details("movie" if mt == "movie" else "tv", int(tid))
+        s._send_json({"ok": True, "name": d.get("name") or d.get("title") or "",
+                      "year": (d.get("first_air_date") or d.get("release_date") or "")[:4],
+                      "overview": d.get("overview") or "暂无简介",
+                      "poster": d.get("poster_path") or ""})
     def _dashboard(s):
         out = {}
         try:
