@@ -5,7 +5,7 @@ PackSeed —— 辅种服务 (cross-seed 替代)
 按"大小粗筛 + 文件清单精确比对"辅种，绕过名字解析，能辅跨季合集。
 纯标准库：无第三方依赖。自带 sqlite 记录 + 网页仪表盘。
 """
-import os, re, json, time, base64, sqlite3, threading, urllib.request, urllib.parse, socket, traceback
+import os, re, json, time, base64, shutil, sqlite3, threading, urllib.request, urllib.parse, socket, traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 socket.setdefaulttimeout(25)
@@ -52,6 +52,7 @@ CFG = {
     "EMBY_KEY":     os.environ.get("EMBY_KEY", ""),
     "ORGANIZE":     os.environ.get("ORGANIZE", "1") == "1",  # 下载完成自动整理入库+转种
     "TR_SEED_DIR":  os.environ.get("TR_SEED_DIR", ""),    # 转种到 tr 时的数据目录(容器内)，留空=用 qb 的保存目录
+    "KEEP_MIN_FREE_GB": int(os.environ.get("KEEP_MIN_FREE_GB", "200")),  # 批量保种磁盘保护线:剩余低于此值自动暂停
 }
 
 # ============ 设置中心: /config/settings.json 覆盖环境变量,网页可改,热生效 ============
@@ -137,6 +138,7 @@ SETTING_GROUPS = [
         ("MIN_SEEDERS", "搜索结果做种数门槛", "", False),
         ("SCAN_INTERVAL", "辅种扫描间隔(秒)", "", False),
         ("TR_BAN_SITES", "tr被ban站点黑名单", "逗号分隔,命中站点不注入", False),
+        ("KEEP_MIN_FREE_GB", "批量保种磁盘保护线(GB)", "剩余空间低于此值,保种任务自动暂停,防止塞爆", False),
     ]),
 ]
 SETTABLE = {k for _, fs in SETTING_GROUPS for k, _, _, _ in fs}
@@ -187,6 +189,10 @@ def init_db():
         conf TEXT, status TEXT, files INTEGER DEFAULT 0, ts INTEGER)""")
     try: c.execute("ALTER TABLE media ADD COLUMN save TEXT")   # 下载内容的磁盘路径(content_path)
     except Exception: pass
+    # 批量保种任务队列
+    c.execute("""CREATE TABLE IF NOT EXISTS keepseed(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, size INTEGER, url TEXT,
+        indexer TEXT, status TEXT, err TEXT, ts INTEGER)""")
     c.commit(); c.close()
 
 _WECOM = {"tok": "", "exp": 0}
@@ -1286,6 +1292,12 @@ def transfer_to_tr(qb, ih, name, save_path):
 def process_completed(qb, t):
     """qb 一个种子下载完成后的全套处理"""
     ih = t["hash"]; name = t["name"]; sp = t["save_path"]
+    if "keepseed" in (t.get("tags") or ""):
+        # 批量保种的种子:不刮削不入库,直接转 tr 做种;之后辅种扫描自然会带上它
+        if transfer_to_tr(qb, ih, name, sp):
+            c = db(); c.execute("UPDATE keepseed SET status='done' WHERE name=? AND status='pushed'", (name,)); c.commit(); c.close()
+            logmsg("INFO", f"保种完成→tr: {name[:44]}")
+        return
     try:
         files = [(os.path.join(sp, f["name"]), f["name"]) for f in qb.files(ih)]
     except Exception as e:
@@ -1388,15 +1400,16 @@ def qb_watcher():
     time.sleep(20)
     while True:
         try:
-            if CFG["ORGANIZE"] and CFG["TMDB_KEY"]:
-                qb = QB()
-                for t in qb.torrents():
-                    if t.get("progress", 0) < 1: continue
-                    ih = t["hash"]
-                    c = db(); row = c.execute("SELECT status FROM media WHERE info_hash=?", (ih,)).fetchone(); c.close()
-                    if row: continue          # done/hold/error 都不重复自动处理，hold 走手动确认
-                    logmsg("INFO", f"qb 下载完成，整理+转种: {t['name'][:44]}")
-                    process_completed(qb, t)
+            qb = QB()
+            for t in qb.torrents():
+                if t.get("progress", 0) < 1: continue
+                # 普通种子要整理入库(需开关+TMDB);保种种子只转tr,无条件处理
+                if "keepseed" not in (t.get("tags") or "") and not (CFG["ORGANIZE"] and CFG["TMDB_KEY"]): continue
+                ih = t["hash"]
+                c = db(); row = c.execute("SELECT status FROM media WHERE info_hash=?", (ih,)).fetchone(); c.close()
+                if row: continue          # done/hold/error 都不重复自动处理，hold 走手动确认
+                logmsg("INFO", f"qb 下载完成，整理+转种: {t['name'][:44]}")
+                process_completed(qb, t)
         except Exception as e:
             logmsg("ERROR", f"qb监控异常: {e}")
         time.sleep(60)
@@ -1682,6 +1695,18 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 .srow input{background:rgba(255,255,255,.14);border:none;color:#fff;border-radius:10px;padding:9px 13px;font-size:13px;outline:none;width:100%}
 .srow input:focus{box-shadow:0 0 0 2.5px rgba(255,255,255,.5)}
 .shint{grid-column:2;font-size:11px;color:var(--sub);margin-top:-4px}
+.ksin{background:rgba(255,255,255,.14);border:none;color:#fff;border-radius:10px;padding:9px 13px;font-size:13px;outline:none}
+.ksin:focus{box-shadow:0 0 0 2.5px rgba(255,255,255,.5)}
+select.ksin option{color:#00206e}
+.chip{display:inline-block;background:rgba(255,255,255,.16);border-radius:980px;padding:2px 10px;font-size:11px;margin:2px 3px 2px 0}
+.chip.on{background:rgba(80,220,140,.25);color:#b8ffd6}
+.chip.off{background:rgba(255,255,255,.09);color:var(--sub)}
+.chip.ban{background:rgba(255,80,80,.28);color:#ffc9c9;font-weight:700}
+#xf-ov{position:fixed;inset:0;background:rgba(0,18,70,.55);backdrop-filter:blur(8px);z-index:60;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:.25s}
+#xf-ov.show{opacity:1;pointer-events:auto}
+#xf-box{width:min(680px,92vw);max-height:86vh;overflow-y:auto;background:rgba(255,255,255,.16);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,.3);border-radius:22px;padding:24px;box-shadow:0 30px 80px rgba(0,10,60,.6)}
+.xfl{display:block;font-size:12px;font-weight:700;margin:12px 0 4px;color:rgba(255,255,255,.85)}
+.xfta{width:100%;background:rgba(0,20,90,.35);border:1px solid rgba(255,255,255,.22);color:#fff;border-radius:10px;padding:9px 12px;font-size:12.5px;line-height:1.6;outline:none;resize:vertical;font-family:ui-monospace,Menlo,monospace}
 </style></head><body><div class=wrap>
 <h1 style="display:flex;align-items:center;gap:11px"><svg width="34" height="34" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="14" fill="#0a2fb5"/><circle cx="46" cy="17" r="7.5" fill="#FFD400"/><path d="M2 37c7-9 15-9 21 0s15 9 21 0 12-8 18-3v30H2z" fill="#ffffff" opacity="0.95"/><path d="M2 47c7-7 13-7 19 0s15 7 21 0 14-7 20-1v18H2z" fill="#CFE0FF" opacity="0.9"/></svg>观澜 <span style="font-size:15px;font-weight:600;color:rgba(255,255,255,.6);letter-spacing:.04em">Wavegazer</span></h1><div class=sub>观影观澜 · 搜索 / 下载 / 刮削 / 保种 / 辅种 —— 一个人的影音港湾</div>
 <div class=tabs>
@@ -1689,6 +1714,7 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 <a href="#dl" class="tabbtn" data-t="dl">⬇️ 下载管理</a>
 <a href="#media" class="tabbtn" data-t="media">📥 整理入库</a>
 <a href="#seed" class="tabbtn" data-t="seed">🌱 辅种</a>
+<a href="#keep" class="tabbtn" data-t="keep">🌊 保种转种</a>
 <a href="#logs" class="tabbtn" data-t="logs">📋 日志</a>
 <a href="#setup" class="tabbtn" data-t="setup">⚙️ 设置</a>
 </div>
@@ -1731,6 +1757,41 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 </div>
 <div class=card><h2>辅种记录 <span class=mut style=font-weight:400>· 每 {{INTERVAL}}s 扫描 · 点种子名看来源和去向 · 辅不上可手动关键词重搜</span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>在辅站数</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
 </div>
+<div id=tab-keep class=tab>
+<div class=card><h2>🌊 批量保种 <span class=mut style=font-weight:400>· 选站拉列表 → 筛选勾选 → 批量推 qb,下载完自动转 tr 做种 · 节流拉取,磁盘低于保护线自动暂停</span></h2>
+<div style="padding:4px 20px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+<select id=ks-ix class=ksin style="min-width:160px"><option value="">加载站点中…</option></select>
+<input id=ks-q class=ksin placeholder="关键词(留空=最新种子)" style="flex:1;min-width:150px">
+<button class=dlbtn onclick="ksFetch(false,this)">拉取列表</button>
+<button class=dlbtn style="background:rgba(255,255,255,.2);color:#fff" onclick="ksFetch(true,this)">加载更多</button>
+</div>
+<div style="padding:0 20px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
+<span class=mut>筛选:</span>
+体积≤<input id=ks-fsize class=ksin style="width:70px" placeholder="GB">GB
+做种数≤<input id=ks-fseed class=ksin style="width:60px" placeholder="如 3">
+<span class=mut>(保濒危种就填个小数字)</span>
+<button class=dlbtn style="padding:7px 16px" onclick="ksRender()">应用</button>
+<button class=dlbtn style="padding:7px 16px;background:rgba(255,255,255,.2);color:#fff" onclick="ksAll()">全选显示项</button>
+<button class=dlbtn style="padding:7px 20px;background:var(--pop);color:#00206e" onclick="ksPush(this)">⬇️ 推送选中保种</button>
+</div>
+<div id=ks-list style="padding:0 20px 16px"><span class=mut>选个站点开拉。空关键词=按站内最新排列。</span></div>
+</div>
+<div class=card><h2>📦 保种任务 <span class=mut style=font-weight:400>· 队列逐个下载推 qb · <button class=dlbtn style="padding:4px 14px;font-size:12px;background:rgba(255,255,255,.2);color:#fff" onclick="ksStop()">⏹ 停止并清空队列</button></span></h2>
+<div id=ks-stat style="padding:0 20px 16px"><span class=mut>暂无任务</span></div></div>
+<div class=card><h2>🧭 缺种报告 <span class=mut style=font-weight:400>· 每个内容在哪些站做种、哪些站搜不到 · 搜不到≠一定没有,转种前自己再确认一眼 · 带禁转标记的资料包直接拦</span> <button class=dlbtn style="padding:5px 16px;font-size:12px" onclick="gapLoad(this)">刷新</button></h2>
+<div id=gap style="padding:0 20px 16px"><span class=mut>点「刷新」生成(要请求 Prowlarr,几秒钟)</span></div></div>
+<div id=xf-ov onclick="this.classList.remove('show')"><div id=xf-box onclick="event.stopPropagation()">
+<div style="font-size:17px;font-weight:800;margin-bottom:4px">🚚 发种资料包 <span class=mut id=xf-meta style=font-weight:400></span></div>
+<div class=mut style="font-size:12px" id=xf-tip></div>
+<label class=xfl>主标题</label><textarea id=xf-t class=xfta rows=2></textarea>
+<label class=xfl>副标题</label><textarea id=xf-s class=xfta rows=1></textarea>
+<label class=xfl>简介(bbcode)</label><textarea id=xf-d class=xfta rows=8></textarea>
+<div style="margin-top:10px;display:flex;gap:10px">
+<button class=dlbtn onclick="xfCopy('xf-t',this)">复制主标题</button>
+<button class=dlbtn onclick="xfCopy('xf-s',this)">复制副标题</button>
+<button class=dlbtn onclick="xfCopy('xf-d',this)">复制简介</button>
+</div></div></div>
+</div>
 <div id=tab-logs class=tab>
 <div class=card><h2>最近活动</h2><table><tr><th style=width:150px>时间</th><th>消息</th></tr>{{LOGS}}</table></div>
 </div>
@@ -1748,7 +1809,7 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 <div class=sub style=text-align:center>观澜 Wavegazer · 一个人的影音港湾 · MIT 开源</div>
 </div><div id=toast></div>
 <script>
-var _dlT=null;var _t=null;
+var _dlT=null;var _t=null;var _ksT=null;
 function armReload(t){
  clearTimeout(_t);_t=null;
  if(t=='seed'||t=='media'||t=='logs')_t=setTimeout(()=>location.reload(),20000);  // 只有表格页才自动刷新
@@ -1758,9 +1819,10 @@ function showTab(t){
  document.querySelectorAll('.tabbtn').forEach(e=>e.classList.remove('on'));
  var el=document.getElementById('tab-'+t);(el||document.getElementById('tab-search')).classList.add('active');
  var b=document.querySelector('.tabbtn[data-t="'+(el?t:'search')+'"]');if(b)b.classList.add('on');
- clearInterval(_dlT);
+ clearInterval(_dlT);clearInterval(_ksT);
  armReload(el?t:'search');
  if(t=='dl'){pollDl();_dlT=setInterval(pollDl,4000);}
+ if(t=='keep'){ksInit();_ksT=setInterval(ksStatus,3000);}
 }
 var SM={downloading:'⬇️ 下载中',stalledDL:'🐢 等速度',metaDL:'🧲 元数据',forcedDL:'⬇️ 下载中',pausedDL:'⏸ 暂停',queuedDL:'⏳ 排队',allocating:'分配空间',uploading:'✅ 完成·待转种',stalledUP:'✅ 完成·待转种',queuedUP:'✅ 完成·待转种',forcedUP:'✅ 完成·待转种',checkingDL:'🔍 校验中',checkingUP:'🔍 校验中',checkingResumeData:'🔍 校验中',error:'❌ 错误',missingFiles:'❌ 文件缺失'};
 var STM={done:['✅ 已入库+转种','done'],hold:['⚠️ 待确认(去整理入库页处理)','nomatch'],processing:['🔄 整理中','searching'],error:['❌ 出错','err']};
@@ -1814,6 +1876,109 @@ function pollDl(){
   });
   dd.appendChild(tbl);
  }).catch(()=>{});
+}
+/* ===== 批量保种 / 缺种报告 / 转种资料包 ===== */
+var _ksItems=[],_ksOff=0,_ksInited=false;
+function ksInit(){
+ ksStatus();
+ if(_ksInited)return;_ksInited=true;
+ fetch('/api/ks/indexers').then(r=>r.json()).then(function(d){
+  var sel=document.getElementById('ks-ix');sel.innerHTML='';
+  if(!d.ok||!d.list.length){sel.innerHTML='<option value="">取不到站点(检查Prowlarr)</option>';return;}
+  d.list.forEach(function(i){var o=document.createElement('option');o.value=i.id;o.textContent=i.name;sel.appendChild(o);});
+ }).catch(()=>{});
+}
+function ksFetch(more,btn){
+ var ix=document.getElementById('ks-ix').value;
+ if(!ix){toast('先选站点');return;}
+ if(!more){_ksItems=[];_ksOff=0;}
+ if(btn){btn.disabled=true;btn.dataset.t=btn.textContent;btn.textContent='拉取中…';}
+ var q=encodeURIComponent(document.getElementById('ks-q').value.trim());
+ fetch('/api/ks/list?ix='+ix+'&q='+q+'&offset='+_ksOff).then(r=>r.json()).then(function(d){
+  if(btn){btn.disabled=false;btn.textContent=btn.dataset.t;}
+  if(!d.ok){toast('拉取失败: '+(d.err||''));return;}
+  var seen={};_ksItems.forEach(x=>seen[x.url]=1);
+  d.items.forEach(function(x){if(!seen[x.url])_ksItems.push(x);});
+  _ksOff+=100;ksRender();
+  toast('本次+'+d.items.length+'条,累计'+_ksItems.length+'条');
+ }).catch(function(){if(btn){btn.disabled=false;btn.textContent=btn.dataset.t;}toast('拉取失败');});
+}
+function ksFiltered(){
+ var mg=parseFloat(document.getElementById('ks-fsize').value)||0;
+ var ms=document.getElementById('ks-fseed').value.trim();
+ return _ksItems.filter(function(x){
+  if(mg&&x.size>mg*1073741824)return false;
+  if(ms!==''&&x.seeders>parseInt(ms))return false;
+  return true;});
+}
+function ksRender(){
+ var el=document.getElementById('ks-list'),fs=ksFiltered();
+ if(!fs.length){el.innerHTML='<span class=mut>没有符合条件的种子</span>';return;}
+ var h='<table><tr><th style=width:30px></th><th>种子名</th><th class=r>体积</th><th class=r>做种</th><th>发布</th></tr>';
+ fs.slice(0,400).forEach(function(x,i){
+  var nm=x.name.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  h+='<tr><td><input type=checkbox class=kscb data-i='+_ksItems.indexOf(x)+'></td>'
+   +'<td class=name title="'+nm+'">'+(x.noxfer?'<span class="chip ban">🚫禁转</span> ':'')+nm+'</td>'
+   +'<td class=r>'+x.sizeh+'</td><td class=r>'+x.seeders+'</td><td class=mut>'+x.date+'</td></tr>';
+ });
+ h+='</table><div class=mut style=margin-top:6px>显示 '+Math.min(fs.length,400)+' / 符合 '+fs.length+' / 已拉 '+_ksItems.length+' 条 · 禁转种可保种但转种助手会拦</div>';
+ el.innerHTML=h;
+}
+function ksAll(){document.querySelectorAll('.kscb').forEach(c=>c.checked=true);}
+function ksPush(btn){
+ var picks=[];
+ document.querySelectorAll('.kscb:checked').forEach(function(c){var x=_ksItems[parseInt(c.dataset.i)];if(x)picks.push({name:x.name,size:x.size,url:x.url,indexer:''});});
+ if(!picks.length){toast('先勾选种子');return;}
+ var tot=picks.reduce((a,b)=>a+b.size,0);
+ if(!confirm('推送 '+picks.length+' 个种子进保种队列,共约 '+(tot/1073741824).toFixed(1)+' GB。确定?'))return;
+ btn.disabled=true;
+ fetch('/api/ks/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:picks})})
+ .then(r=>r.json()).then(function(d){btn.disabled=false;toast(d.ok?('已入队 '+d.n+' 个,后台逐个拉取'):'失败');ksStatus();})
+ .catch(function(){btn.disabled=false;toast('失败');});
+}
+function ksStop(){fetch('/api/ks/stop').then(r=>r.json()).then(()=>{toast('已停止,队列清空');ksStatus();});}
+function ksStatus(){
+ fetch('/api/ks/status').then(r=>r.json()).then(function(d){
+  var el=document.getElementById('ks-stat');if(!el)return;
+  var h='<div style="font-size:13px;line-height:2">'
+   +(d.running?'🔄 执行中: <b>'+(d.cur||'…')+'</b>':'⏸ 空闲')
+   +' · 队列 <b>'+d.queued+'</b> · 已推qb <b style=color:var(--pop)>'+d.pushed+'</b> · 已转tr <b style=color:#7dffb0>'+d.done+'</b> · 失败 '+d.error
+   +' · 磁盘余 '+d.free+'GB'+(d.msg?'<br>'+d.msg:'')+'</div>';
+  el.innerHTML=h;
+ }).catch(()=>{});
+}
+function gapLoad(btn){
+ if(btn){btn.disabled=true;btn.textContent='生成中…';}
+ fetch('/api/gap').then(r=>r.json()).then(function(d){
+  if(btn){btn.disabled=false;btn.textContent='刷新';}
+  var el=document.getElementById('gap');
+  if(!d.ok||!d.rows.length){el.innerHTML='<span class=mut>暂无数据(先让辅种扫描跑起来)</span>';return;}
+  var h='<table><tr><th>内容</th><th class=r>体积</th><th>已在站('+'共'+d.sites+'站)</th><th>缺种站</th><th></th></tr>';
+  d.rows.forEach(function(r){
+   var nm=r.name.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+   var on=r.seeded.map(s=>'<span class="chip on">'+s+'</span>').join('');
+   var off=r.missing.slice(0,12).map(s=>'<span class="chip off">'+s+'</span>').join('')+(r.missing.length>12?'<span class=mut> +'+(r.missing.length-12)+'</span>':'');
+   h+='<tr><td class=name title="'+nm+'">'+nm+'</td><td class=r>'+r.sizeh+'</td><td>'+on+'</td><td>'+(r.missing.length?off:'<span class=mut>全覆盖 🎉</span>')+'</td>'
+    +'<td>'+(r.missing.length?'<button class=dlbtn style="padding:5px 14px;font-size:12px" onclick="xfer(\''+r.hash+'\')">🚚 资料包</button>':'')+'</td></tr>';
+  });
+  el.innerHTML=h+'</table>';
+ }).catch(function(){if(btn){btn.disabled=false;btn.textContent='刷新';}});
+}
+function xfer(h){
+ fetch('/api/xfer?hash='+h).then(r=>r.json()).then(function(d){
+  if(!d.ok){toast(d.banned?('🚫 '+d.err):('失败: '+(d.err||'')));return;}
+  document.getElementById('xf-meta').textContent=' · '+d.sizeh+' · '+d.files+' 个文件';
+  document.getElementById('xf-tip').textContent=d.tip;
+  document.getElementById('xf-t').value=d.title;
+  document.getElementById('xf-s').value=d.sub;
+  document.getElementById('xf-d').value=d.desc;
+  document.getElementById('xf-ov').classList.add('show');
+ });
+}
+function xfCopy(id,btn){
+ var ta=document.getElementById(id);ta.select();
+ try{navigator.clipboard.writeText(ta.value);}catch(e){document.execCommand('copy');}
+ btn.textContent='✅ 已复制';setTimeout(function(){btn.textContent=btn.textContent.replace('✅ 已复制',id=='xf-t'?'复制主标题':id=='xf-s'?'复制副标题':'复制简介');},1200);
 }
 showTab((location.hash||'#search').slice(1));
 window.addEventListener('hashchange',function(){showTab(location.hash.slice(1)||'search');});
@@ -2271,6 +2436,98 @@ def _sjob_run(jid, q):
         log(f"❌ 失败: {str(e)[:60]}")
     job["done"] = True
 
+# ============ 保种 / 缺种 / 转种(资深PT三件套) ============
+# 禁转红线:命中任一标记坚决不转,不给确认后门(转了要被请喝茶的)
+_NOXFER = re.compile(r'禁转|禁止转|独家|独占|首发禁|exclusive|excl\b|\[禁\]', re.I)
+def noxfer(title): return bool(_NOXFER.search(title or ""))
+
+def prowlarr_browse(ixid, query="", offset=0, limit=100):
+    """拉某站种子列表:空关键词=最新种子,Prowlarr 透传站点翻页"""
+    u = (CFG["PROWLARR_URL"] + "/api/v1/search?query=" + urllib.parse.quote(query)
+         + f"&type=search&indexerIds={int(ixid)}&limit={int(limit)}&offset={int(offset)}")
+    req = urllib.request.Request(u, headers={"X-Api-Key": CFG["PROWLARR_KEY"]})
+    return json.load(urllib.request.urlopen(req, timeout=60))
+
+_KS = {"running": False, "stop": False, "msg": "", "cur": ""}
+def keepseed_worker():
+    """批量保种执行器:逐个下载种子推 qb,节流 + 磁盘水位保护"""
+    _KS.update(running=True, stop=False, msg="")
+    try:
+        while not _KS["stop"]:
+            free_gb = shutil.disk_usage("/data").free / 2**30
+            if free_gb < CFG["KEEP_MIN_FREE_GB"]:
+                _KS["msg"] = f"⛔ 磁盘剩余 {free_gb:.0f}GB 低于保护线 {CFG['KEEP_MIN_FREE_GB']}GB,任务暂停"
+                logmsg("WARN", "批量保种触发磁盘保护线,暂停"); break
+            c = db(); row = c.execute("SELECT id,name,size,url,indexer FROM keepseed WHERE status='queued' ORDER BY id LIMIT 1").fetchone(); c.close()
+            if not row: _KS["msg"] = "✅ 队列清空"; break
+            rid, name, size, url, ix = row
+            _KS["cur"] = name[:48]
+            try:
+                data = prowlarr_download(url)
+                if data[:1] != b'd': raise RuntimeError("非种子文件")
+                res = QB().add(data, category="保种", tags="packseed,keepseed")
+                st, err = ("pushed", "") if "Ok" in res else ("error", (res.strip()[:40] or "qb拒绝"))
+            except Exception as e:
+                st, err = "error", str(e)[:60]
+            c = db(); c.execute("UPDATE keepseed SET status=?, err=? WHERE id=?", (st, err, rid)); c.commit(); c.close()
+            if st == "error": logmsg("WARN", f"保种拉取失败 {name[:36]}: {err}")
+            time.sleep(max(CFG["SNATCH_DELAY"], 3))   # 节流:别把站打炸
+    finally:
+        _KS.update(running=False, cur="")
+
+def gap_report():
+    """缺种矩阵:每个内容在哪些站做种、哪些站搜不到(注意:搜不到≠一定没有,可能是站点抽风)"""
+    try: all_sites = [i.get("name", "?") for i in prowlarr_indexers()]
+    except Exception: all_sites = []
+    ban = [b.strip().lower() for b in CFG["TR_BAN_SITES"].split(",") if b.strip()]
+    rows = []
+    c = db()
+    for r in c.execute("""SELECT name,size,info_hash,source FROM torrents WHERE status IN ('done','no_match')
+                          GROUP BY name,size ORDER BY last_searched DESC LIMIT 120""").fetchall():
+        name, size, ih, src = r
+        seeded = {x[0] for x in c.execute(
+            "SELECT DISTINCT indexer FROM matches WHERE info_hash=? AND result IN ('injected','duplicate','tracker')", (ih,)).fetchall() if x[0]}
+        if src: seeded.add(src)
+        low = {s.lower() for s in seeded}
+        missing = [s for s in all_sites if s.lower() not in low
+                   and not any(s.lower() in l or l in s.lower() for l in low)
+                   and not any(b in s.lower() for b in ban)]
+        rows.append({"name": name, "hash": ih, "sizeh": human_size(size),
+                     "seeded": sorted(seeded), "missing": missing})
+    c.close()
+    rows.sort(key=lambda x: len(x["missing"]))
+    return {"ok": True, "sites": len(all_sites), "rows": rows}
+
+def xfer_pack(ih):
+    """半自动发种资料包:标题/副标题/TMDB简介bbcode。禁转标记硬拦截。"""
+    c = db()
+    t = c.execute("SELECT name,size,files FROM torrents WHERE info_hash=?", (ih,)).fetchone()
+    if not t: c.close(); return {"ok": False, "err": "找不到该种子"}
+    name, size, nfiles = t
+    # 禁转检测:本种名字 + 各站搜到的同内容标题,一个带标记就全线拦截
+    titles = [name] + [x[0] or "" for x in c.execute("SELECT matched_name FROM matches WHERE info_hash=?", (ih,)).fetchall()]
+    hit = next((tt for tt in titles if noxfer(tt)), None)
+    m = c.execute("SELECT tmdbid,tmdb_name,year,mtype,poster FROM media WHERE tmdb_name!='' AND status='done' AND (name=? OR info_hash=?) LIMIT 1", (name, ih)).fetchone()
+    c.close()
+    if hit:
+        return {"ok": False, "banned": True, "err": f"检测到禁转/独家标记,坚决不转: {hit[:80]}"}
+    sub, desc = "", ""
+    if m and m[0]:
+        tid, tname, yr, mtype, poster = m
+        sub = f"{tname} ({yr})" if yr else tname
+        try:
+            d = tmdb_details(mtype or "tv", tid) or {}
+            ov = d.get("overview") or ""
+            lines = [f"[img]https://image.tmdb.org/t/p/original{poster}[/img]" if poster else "",
+                     f"◎片名  {tname} ({yr})", f"◎类型  {'剧集' if (mtype or 'tv')=='tv' else '电影'}",
+                     f"◎TMDB  https://www.themoviedb.org/{mtype or 'tv'}/{tid}",
+                     "", "◎简介", ov]
+            desc = "\n".join(l for l in lines if l is not None)
+        except Exception:
+            desc = f"◎片名  {sub}\n◎TMDB  https://www.themoviedb.org/{mtype or 'tv'}/{tid}"
+    return {"ok": True, "title": name, "sub": sub, "desc": desc,
+            "sizeh": human_size(size), "files": nfiles,
+            "tip": "上传时直接用原站 .torrent(NexusPHP 会自动换 passkey 重签);目标站若强制 source 标记需重制种子。发布前请再核对目标站发种规则。"}
 FAVICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
  '<rect width="64" height="64" rx="14" fill="#002FA7"/>'
  '<circle cx="46" cy="17" r="7.5" fill="#FFD400"/>'
@@ -2314,6 +2571,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if s.path.startswith("/api/settings"):
             s._settings_post(); return
+        if s.path.startswith("/api/ks/add"):
+            s._ks_add(); return
         s.send_response(404); s.end_headers()
     def do_GET(s):
         if s.path.startswith("/api/wecom"):
@@ -2355,6 +2614,14 @@ class Handler(BaseHTTPRequestHandler):
             s._svc_test(); return
         if s.path.startswith("/api/dashboard"):
             s._dashboard(); return
+        if s.path.startswith("/api/ks/"):
+            s._ks(); return
+        if s.path.startswith("/api/gap"):
+            s._send_json(gap_report()); return
+        if s.path.startswith("/api/xfer"):
+            from urllib.parse import urlparse, parse_qs
+            q_ = parse_qs(urlparse(s.path).query)
+            s._send_json(xfer_pack((q_.get("hash", [""])[0]).strip())); return
         if s.path.startswith("/api/downloads"):
             s._downloads(); return
         if s.path.startswith("/api/canceldl"):
@@ -2722,6 +2989,66 @@ class Handler(BaseHTTPRequestHandler):
         s.send_response(200); s.send_header("Content-Type","image/jpeg")
         s.send_header("Cache-Control","max-age=604800"); s.send_header("Content-Length",str(len(data)))
         s.end_headers(); s.wfile.write(data)
+    # ---- 批量保种 ----
+    def _ks(s):
+        from urllib.parse import urlparse, parse_qs
+        q_ = parse_qs(urlparse(s.path).query)
+        act = urlparse(s.path).path.rsplit("/", 1)[-1]
+        if act == "indexers":
+            try:
+                s._send_json({"ok": True, "list": [{"id": i["id"], "name": i.get("name", "?")} for i in prowlarr_indexers()]})
+            except Exception as e:
+                s._send_json({"ok": False, "err": str(e)[:60]})
+            return
+        if act == "list":
+            try:
+                rs = prowlarr_browse(q_.get("ix", ["0"])[0], (q_.get("q", [""])[0]).strip(), int(q_.get("offset", ["0"])[0]))
+                items = [{"name": r.get("title") or "", "size": r.get("size") or 0, "sizeh": human_size(r.get("size") or 0),
+                          "seeders": r.get("seeders", 0), "url": r.get("downloadUrl") or "",
+                          "date": (r.get("publishDate") or "")[:10], "noxfer": noxfer(r.get("title") or "")}
+                         for r in rs if r.get("downloadUrl")]
+                s._send_json({"ok": True, "items": items})
+            except Exception as e:
+                s._send_json({"ok": False, "err": str(e)[:80]})
+            return
+        if act == "status":
+            c = db()
+            cnt = dict(c.execute("SELECT status,COUNT(*) FROM keepseed GROUP BY status").fetchall())
+            recent = [{"name": r[0], "st": r[1], "err": r[2] or ""} for r in
+                      c.execute("SELECT name,status,err FROM keepseed ORDER BY id DESC LIMIT 25").fetchall()]
+            c.close()
+            free_gb = 0
+            try: free_gb = round(shutil.disk_usage("/data").free / 2**30)
+            except Exception: pass
+            s._send_json({"ok": True, "running": _KS["running"], "cur": _KS["cur"], "msg": _KS["msg"],
+                          "queued": cnt.get("queued", 0), "pushed": cnt.get("pushed", 0),
+                          "done": cnt.get("done", 0), "error": cnt.get("error", 0), "free": free_gb})
+            return
+        if act == "stop":
+            _KS["stop"] = True
+            c = db(); c.execute("UPDATE keepseed SET status='skip' WHERE status='queued'"); c.commit(); c.close()
+            s._send_json({"ok": True}); return
+        s._send_json({"ok": False, "err": "未知操作"})
+    def _ks_add(s):
+        try:
+            ln = int(s.headers.get("Content-Length", "0"))
+            body = json.loads(s.rfile.read(ln) or b"{}")
+        except Exception:
+            body = {}
+        items = body.get("items") or []
+        n = 0
+        c = db()
+        for it in items[:500]:
+            if not it.get("url"): continue
+            # 注意:禁转种照样可以保种(只是不能转出去),不拦队列;禁转红线在转种助手里守
+            c.execute("INSERT INTO keepseed(name,size,url,indexer,status,err,ts) VALUES(?,?,?,?,?,?,?)",
+                      (it.get("name") or "", it.get("size") or 0, it["url"], it.get("indexer") or "", "queued", "", int(time.time())))
+            n += 1
+        c.commit(); c.close()
+        if n and not _KS["running"]:
+            threading.Thread(target=keepseed_worker, daemon=True).start()
+        logmsg("INFO", f"批量保种入队 {n} 个")
+        s._send_json({"ok": True, "n": n})
     def _dl(s):
         from urllib.parse import urlparse, parse_qs
         qs_ = parse_qs(urlparse(s.path).query)
