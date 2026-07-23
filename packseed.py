@@ -1568,8 +1568,8 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 .hero .searchbar{max-width:780px;margin:0 auto;padding:0}
 .hero .fbar{justify-content:center;padding:18px 0 0}
 #sresult:not(:empty){background:var(--card);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:20px;margin-bottom:20px;overflow:hidden}
-.recentcard{overflow:visible}
-.rflow{overflow:hidden;padding:30px 0 24px;-webkit-mask-image:linear-gradient(90deg,transparent,#000 5%,#000 95%,transparent);mask-image:linear-gradient(90deg,transparent,#000 5%,#000 95%,transparent)}
+.recentcard{overflow:hidden}
+.rflow{overflow:hidden;padding:36px 0 26px;-webkit-mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent);mask-image:linear-gradient(90deg,transparent,#000 4%,#000 96%,transparent)}
 .rtrack{display:flex;gap:14px;width:max-content;padding:0 20px;will-change:transform}
 @keyframes bob{from{transform:translateY(-4px) rotate(-.5deg)}to{transform:translateY(4px) rotate(.5deg)}}
 .rbob{animation:bob 4.2s ease-in-out infinite alternate}
