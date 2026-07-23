@@ -1742,14 +1742,19 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 <div class=sub style=text-align:center>观澜 Wavegazer · 一个人的影音港湾 · MIT 开源</div>
 </div><div id=toast></div>
 <script>
-var _dlT=null;
+var _dlT=null;var _t=null;
+function armReload(t){
+ clearTimeout(_t);_t=null;
+ if(t=='seed'||t=='media'||t=='logs')_t=setTimeout(()=>location.reload(),20000);  // 只有表格页才自动刷新
+}
 function showTab(t){
  document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
  document.querySelectorAll('.tabbtn').forEach(e=>e.classList.remove('on'));
  var el=document.getElementById('tab-'+t);(el||document.getElementById('tab-search')).classList.add('active');
  var b=document.querySelector('.tabbtn[data-t="'+(el?t:'search')+'"]');if(b)b.classList.add('on');
  clearInterval(_dlT);
- if(t=='dl'){clearTimeout(_t);pollDl();_dlT=setInterval(pollDl,4000);}
+ armReload(el?t:'search');
+ if(t=='dl'){pollDl();_dlT=setInterval(pollDl,4000);}
 }
 var SM={downloading:'⬇️ 下载中',stalledDL:'🐢 等速度',metaDL:'🧲 元数据',forcedDL:'⬇️ 下载中',pausedDL:'⏸ 暂停',queuedDL:'⏳ 排队',allocating:'分配空间',uploading:'✅ 完成·待转种',stalledUP:'✅ 完成·待转种',queuedUP:'✅ 完成·待转种',forcedUP:'✅ 完成·待转种',checkingDL:'🔍 校验中',checkingUP:'🔍 校验中',checkingResumeData:'🔍 校验中',error:'❌ 错误',missingFiles:'❌ 文件缺失'};
 var STM={done:['✅ 已入库+转种','done'],hold:['⚠️ 待确认(去整理入库页处理)','nomatch'],processing:['🔄 整理中','searching'],error:['❌ 出错','err']};
@@ -1806,7 +1811,7 @@ function pollDl(){
 }
 showTab((location.hash||'#search').slice(1));
 window.addEventListener('hashchange',function(){showTab(location.hash.slice(1)||'search');});
-var _t=setTimeout(()=>location.reload(),15000);
+
 function dockify(el){
  if(!el)return;
  var raf=null,mx=null;
