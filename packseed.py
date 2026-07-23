@@ -54,6 +54,9 @@ CFG = {
     "TR_SEED_DIR":  os.environ.get("TR_SEED_DIR", ""),    # 转种到 tr 时的数据目录(容器内)，留空=用 qb 的保存目录
     "KEEP_MIN_FREE_GB": int(os.environ.get("KEEP_MIN_FREE_GB", "200")),  # 批量保种磁盘保护线:剩余低于此值自动暂停
     "KEEP_DIR": os.environ.get("KEEP_DIR", "/data/downloads/keepseed"),  # 保种专用目录:与正常下载隔离,不辅种不入库,到期整锅清
+    "FREE_WATCH_IX": os.environ.get("FREE_WATCH_IX", ""),   # 抢免费守候的站点(Prowlarr索引器id),空=关闭
+    "FREE_WATCH_MIN": int(os.environ.get("FREE_WATCH_MIN", "5")),   # 守候刷新间隔(分钟)
+    "FREE_MAX_GB": int(os.environ.get("FREE_MAX_GB", "30")),        # 守候单种体积上限(GB),0=不限
 }
 
 # ============ 设置中心: /config/settings.json 覆盖环境变量,网页可改,热生效 ============
@@ -137,6 +140,8 @@ SETTING_GROUPS = [
     ("🌊 批量保种(选用)", [
         ("KEEP_DIR", "保种专用目录", "容器内路径。批量保种的种子全部隔离在此:不辅种/不入库/不打扰正常下载,到期删此目录+tr按目录删种即整体清仓", False),
         ("KEEP_MIN_FREE_GB", "磁盘保护线(GB)", "剩余空间低于此值,保种任务自动暂停,防止塞爆盘", False),
+        ("FREE_WATCH_MIN", "抢免费守候间隔(分钟)", "盯站频率,别低于3分钟(刷太狠会被站盯上)", False),
+        ("FREE_MAX_GB", "抢免费单种上限(GB)", "守候只抢不超过此体积的免费种,0=不限。守候开关在「保种转种」页", False),
     ]),
     ("⚙️ 其他", [
         ("PUBLIC_URL", "本面板公网地址", "图文通知海报要用,如 https://seed.example.com", False),
@@ -145,7 +150,7 @@ SETTING_GROUPS = [
         ("TR_BAN_SITES", "tr被ban站点黑名单", "逗号分隔,命中站点不注入", False),
     ]),
 ]
-SETTABLE = {k for _, fs in SETTING_GROUPS for k, _, _, _ in fs}
+SETTABLE = {k for _, fs in SETTING_GROUPS for k, _, _, _ in fs} | {"FREE_WATCH_IX"}   # 守候站点id由保种页按钮写入,不进表单
 load_settings()
 
 # ============ DB ============
@@ -1774,13 +1779,21 @@ select.ksin option{color:#00206e}
 <input id=ks-q class=ksin placeholder="关键词(留空=全站最新)" style="flex:1;min-width:140px">
 <span class=mut>|</span>
 单种体积≤<input id=ks-fsize class=ksin style="width:64px" placeholder="不限" oninput="ksRender()">GB
-做种数≤<input id=ks-fseed class=ksin style="width:56px" placeholder="不限" oninput="ksRender()"><span class=mut>(只保濒危种填如 3;都留空=什么都要)</span>
+做种数≤<input id=ks-fseed class=ksin style="width:56px" placeholder="不限" oninput="ksRender()">
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type=checkbox id=ks-ffree onchange="ksRender()">🆓只要免费</label>
+<span class=mut>(都留空=什么都要)</span>
 </div>
 <div style="margin:6px 20px 8px;padding:12px 16px;background:rgba(255,212,0,.13);border:1px solid rgba(255,212,0,.4);border-radius:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
 <span style="font-weight:800">② 🤖 全自动保种(推荐)</span>
 共保<input id=ks-tgt class=ksin style="width:80px" placeholder="2048">GB
 <button class=dlbtn style="padding:8px 24px;background:var(--pop);color:#00206e" onclick="ksAuto(this)">🚀 开始自动保种</button>
-<span class=mut>就这一个按钮:自动翻页拉取整站,按①的条件过滤,已有的跳过,边拉边下,够量自动停。2T=2048</span>
+<span class=mut>就这一个按钮:自动翻页拉取整站,按①的条件过滤(含🆓),已有的跳过,边拉边下,够量自动停。2T=2048</span>
+</div>
+<div style="margin:0 20px 8px;padding:12px 16px;background:rgba(255,255,255,.10);border:1px solid var(--line);border-radius:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
+<span style="font-weight:800">⚡ 抢免费守候(刷上传)</span>
+<span class=mut>定时盯①选的站,新出的🆓免费种自动抢下做种回吐上传</span>
+<button class=dlbtn id=fw-btn style="padding:7px 20px" onclick="fwToggle(this)">开启守候</button>
+<span class=mut id=fw-stat></span>
 </div>
 <div style="padding:2px 20px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
 <span style="font-weight:800">② ✋ 或手动挑选</span>
@@ -1921,7 +1934,9 @@ function ksFetch(more,btn){
 function ksFiltered(){
  var mg=parseFloat(document.getElementById('ks-fsize').value)||0;
  var ms=document.getElementById('ks-fseed').value.trim();
+ var fo=document.getElementById('ks-ffree').checked;
  return _ksItems.filter(function(x){
+  if(fo&&!x.free)return false;
   if(mg&&x.size>mg*1073741824)return false;
   if(ms!==''&&x.seeders>parseInt(ms))return false;
   return true;});
@@ -1934,7 +1949,7 @@ function ksRender(){
  fs.slice(0,400).forEach(function(x,i){
   var nm=x.name.replace(/&/g,'&amp;').replace(/</g,'&lt;');
   h+='<tr><td><input type=checkbox class=kscb data-i='+_ksItems.indexOf(x)+'></td>'
-   +'<td class=name title="'+nm+'">'+(x.noxfer?'<span class="chip ban">🚫禁转</span> ':'')+nm+'</td>'
+   +'<td class=name title="'+nm+'">'+(x.free?'<span class="chip on">🆓</span> ':'')+(x.noxfer?'<span class="chip ban">🚫禁转</span> ':'')+nm+'</td>'
    +'<td class=r>'+x.sizeh+'</td><td class=r>'+x.seeders+'</td><td class=mut>'+x.date+'</td></tr>';
  });
  h+='</table><div class=mut style=margin-top:6px>显示 '+Math.min(fs.length,400)+' / 符合 '+fs.length+' / 已拉 '+_ksItems.length+' 条 · 禁转种可保种但转种助手会拦</div>';
@@ -1967,7 +1982,7 @@ function ksAuto(btn){
  var ms=document.getElementById('ks-fseed').value.trim();
  if(!confirm('自动翻页拉取该站种子直到入队约 '+tgt+' GB(套用当前筛选,已有的自动跳过),边拉边下。继续?'))return;
  btn.disabled=true;
- fetch('/api/ks/auto?ix='+ix+'&q='+encodeURIComponent(q)+'&target='+tgt+'&fsize='+mg+'&fseed='+(ms===''?'-1':ms))
+ fetch('/api/ks/auto?ix='+ix+'&q='+encodeURIComponent(q)+'&target='+tgt+'&fsize='+mg+'&fseed='+(ms===''?'-1':ms)+'&free='+(document.getElementById('ks-ffree').checked?1:0))
  .then(r=>r.json()).then(function(d){btn.disabled=false;toast(d.ok?'🤖 自动拉取已启动,看下方任务进度':'启动失败: '+(d.err||''));ksStatus();})
  .catch(function(){btn.disabled=false;toast('启动失败');});
 }
@@ -1981,7 +1996,20 @@ function ksStatus(){
    +(d.af||d.afmsg?'<br>'+(d.af?'🤖 ':'')+(d.afmsg||''):'')
    +(d.msg?'<br>'+d.msg:'')+'</div>';
   el.innerHTML=h;
+  var fb=document.getElementById('fw-btn'),fst=document.getElementById('fw-stat');
+  if(fb){
+   if(d.fw){fb.textContent='🔴 关闭守候';fb.style.background='rgba(255,120,110,.9)';fb.style.color='#fff';}
+   else{fb.textContent='⚡ 开启守候';fb.style.background='';fb.style.color='';}
+   fst.textContent=(d.fw?'守候中(每'+d.fwmin+'分钟) · ':'未开启 · ')+(d.fwmsg||'');
+  }
  }).catch(()=>{});
+}
+function fwToggle(btn){
+ var on=btn.textContent.indexOf('关闭')>=0;
+ if(on){fetch('/api/ks/watch?ix=').then(r=>r.json()).then(()=>{toast('守候已关闭');ksStatus();});return;}
+ var ix=document.getElementById('ks-ix').value;
+ if(!ix){toast('先在①里选要守候的站点');return;}
+ fetch('/api/ks/watch?ix='+ix).then(r=>r.json()).then(function(d){toast(d.ok?'⚡ 守候已开启,新免费种自动抢':'失败');ksStatus();});
 }
 function gapLoad(btn){
  if(btn){btn.disabled=true;btn.textContent='生成中…';}
@@ -2526,7 +2554,9 @@ def nexus_browse(ixid, page):
         if dm: sd = int(dm.group(1))
         tm = re.search(r'<span title="(\d{4}-\d{2}-\d{2})', seg)
         if tm: dt = tm.group(1)
-        items.append({"title": _html.unescape(title), "size": sz, "seeders": sd,
+        # NexusPHP 优惠标记: pro_free / pro_free2up = 免费(下载不计流量,刷上传神种)
+        free = 1 if ("pro_free" in seg or "pro_twoupfree" in seg) else 0
+        items.append({"title": _html.unescape(title), "size": sz, "seeders": sd, "free": free,
                       "downloadUrl": f"{base}/download.php?id={tid}", "publishDate": dt})
     return items
 
@@ -2575,7 +2605,7 @@ def keepseed_worker():
         _KS.update(running=False, cur="")
 
 _KSF = {"running": False, "stop": False, "msg": ""}
-def ks_autofill(ixid, query, target_gb, max_gb, max_seed):
+def ks_autofill(ixid, query, target_gb, max_gb, max_seed, free_only=False):
     """自动拉满:后台翻页拉站内列表,按筛选条件入队,累计到目标体积收工。边拉边下。"""
     _KSF.update(running=True, stop=False, msg="🤖 自动拉取启动…")
     try:
@@ -2600,6 +2630,7 @@ def ks_autofill(ixid, query, target_gb, max_gb, max_seed):
                 seen_urls.add(r["downloadUrl"])
                 nm, sz, sd = r.get("title") or "", r.get("size") or 0, r.get("seeders", 0) or 0
                 if sz <= 0: continue
+                if free_only and not r.get("free"): continue
                 if max_gb and sz > max_gb * 2**30: continue
                 if max_seed is not None and sd > max_seed: continue
                 if (nm, sz) in have: continue       # 队列里有过/tr已做种,不重复下
@@ -2620,6 +2651,43 @@ def ks_autofill(ixid, query, target_gb, max_gb, max_seed):
             threading.Thread(target=keepseed_worker, daemon=True).start()
     finally:
         _KSF["running"] = False
+
+_FW = {"msg": "还没开始", "grab": 0}
+def free_watcher():
+    """抢免费守候:定时盯站点最新页,新出的免费种自动入队抢下(刷上传:免费下载+做种回吐)"""
+    time.sleep(30)
+    while True:
+        ix = 0
+        try: ix = int(CFG["FREE_WATCH_IX"] or 0)
+        except Exception: pass
+        if ix:
+            try:
+                free_gb = shutil.disk_usage("/data").free / 2**30
+                if free_gb < CFG["KEEP_MIN_FREE_GB"]:
+                    _FW["msg"] = f"⛔ 磁盘低于保护线,守候暂停({free_gb:.0f}GB)"
+                else:
+                    items = nexus_browse(ix, 0)
+                    c = db()
+                    have = {(r[0], r[1]) for r in c.execute("SELECT name,size FROM keepseed").fetchall()}
+                    n = 0
+                    for it in items:
+                        if not it.get("free"): continue
+                        if CFG["FREE_MAX_GB"] and it["size"] > CFG["FREE_MAX_GB"] * 2**30: continue
+                        if (it["title"], it["size"]) in have: continue
+                        c.execute("INSERT INTO keepseed(name,size,url,indexer,status,err,ts) VALUES(?,?,?,?,?,?,?)",
+                                  (it["title"], it["size"], it["downloadUrl"], str(ix), "queued", "", int(time.time())))
+                        n += 1
+                    c.commit(); c.close()
+                    if n:
+                        _FW["grab"] += n
+                        logmsg("INFO", f"⚡ 抢到 {n} 个新免费种,累计 {_FW['grab']}")
+                        notify("⚡ 抢免费", f"新入 {n} 个免费种(累计{_FW['grab']}),已推下载")
+                        if not _KS["running"]:
+                            threading.Thread(target=keepseed_worker, daemon=True).start()
+                    _FW["msg"] = f"{time.strftime('%H:%M')} 巡查:页内免费 {sum(1 for i in items if i.get('free'))} 个,新抢 {n},累计 {_FW['grab']}"
+            except Exception as e:
+                _FW["msg"] = f"⚠️ 巡查失败: {str(e)[:40]}"
+        time.sleep(max(180, CFG["FREE_WATCH_MIN"] * 60))   # 最短3分钟,别把站刷毛了
 
 def gap_report():
     """缺种矩阵:每个内容在哪些站做种、哪些站搜不到(注意:搜不到≠一定没有,可能是站点抽风)"""
@@ -3151,6 +3219,7 @@ class Handler(BaseHTTPRequestHandler):
                 rs = ks_browse(int(q_.get("ix", ["0"])[0]), (q_.get("q", [""])[0]).strip(), int(q_.get("page", ["0"])[0]))
                 items = [{"name": r.get("title") or "", "size": r.get("size") or 0, "sizeh": human_size(r.get("size") or 0),
                           "seeders": r.get("seeders", 0), "url": r.get("downloadUrl") or "",
+                          "free": r.get("free", 0),
                           "date": (r.get("publishDate") or "")[:10], "noxfer": noxfer(r.get("title") or "")}
                          for r in rs if r.get("downloadUrl")]
                 s._send_json({"ok": True, "items": items})
@@ -3169,7 +3238,8 @@ class Handler(BaseHTTPRequestHandler):
             s._send_json({"ok": True, "running": _KS["running"], "cur": _KS["cur"], "msg": _KS["msg"],
                           "queued": cnt.get("queued", 0), "pushed": cnt.get("pushed", 0),
                           "done": cnt.get("done", 0), "error": cnt.get("error", 0), "free": free_gb,
-                          "af": _KSF["running"], "afmsg": _KSF["msg"]})
+                          "af": _KSF["running"], "afmsg": _KSF["msg"],
+                          "fw": CFG["FREE_WATCH_IX"], "fwmsg": _FW["msg"], "fwmin": CFG["FREE_WATCH_MIN"]})
             return
         if act == "stop":
             _KS["stop"] = True; _KSF["stop"] = True
@@ -3188,7 +3258,14 @@ class Handler(BaseHTTPRequestHandler):
             if not ixid or tgt <= 0:
                 s._send_json({"ok": False, "err": "要选站点并填目标量"}); return
             threading.Thread(target=ks_autofill,
-                             args=(ixid, (q_.get("q", [""])[0]).strip(), tgt, mg, ms), daemon=True).start()
+                             args=(ixid, (q_.get("q", [""])[0]).strip(), tgt, mg, ms,
+                                   q_.get("free", ["0"])[0] == "1"), daemon=True).start()
+            s._send_json({"ok": True}); return
+        if act == "watch":     # 抢免费守候开关: ix=站点id 开 / ix=空 关
+            ixv = (q_.get("ix", [""])[0]).strip()
+            save_settings({"FREE_WATCH_IX": ixv})
+            _FW["msg"] = "已开启,等下一轮巡查" if ixv else "已关闭"
+            logmsg("INFO", f"抢免费守候: {'开启 站点id='+ixv if ixv else '关闭'}")
             s._send_json({"ok": True}); return
         s._send_json({"ok": False, "err": "未知操作"})
     def _ks_add(s):
@@ -3252,6 +3329,7 @@ def main():
     threading.Thread(target=scanner, daemon=True).start()
     threading.Thread(target=qb_watcher, daemon=True).start()
     threading.Thread(target=notify_worker, daemon=True).start()
+    threading.Thread(target=free_watcher, daemon=True).start()
     try:   # 保种队列有存货(上次重启打断的)则自动续跑
         c = db(); nq = c.execute("SELECT COUNT(*) FROM keepseed WHERE status='queued'").fetchone()[0]; c.close()
         if nq:
