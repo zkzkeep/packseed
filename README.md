@@ -1,4 +1,6 @@
-# PackSeed 🌱
+# 观澜 GuanLan 🌊
+
+> 原名 PackSeed。观影观澜——站在岸上看自己的海。
 
 > 一个人的 PT 全家桶：搜索下载 → 自动刮削入库 Emby → qb 转 tr 保种 → 全站辅种，一个文件全自动。
 > 起点是专治 [cross-seed](https://github.com/cross-seed/cross-seed) 辅不上的「多季合集包」，后来把 MoviePilot 的核心流程也装了进来。

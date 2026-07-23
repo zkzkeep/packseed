@@ -1481,9 +1481,9 @@ def scanner():
 
 # ============ 网页仪表盘 ============
 PAGE = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>PackSeed</title><style>
-:root{--bg:#000;--card:#1c1c1e;--card2:#2c2c2e;--fg:#f5f5f7;--sub:#98989d;--acc:#0a84ff;--ok:#30d158;--warn:#ffd60a;--err:#ff453a;--line:#2c2c2e}
-*{box-sizing:border-box}::selection{background:rgba(10,132,255,.35)}
+<title>观澜 GuanLan</title><style>
+:root{--bg:#000;--card:#1c1c1e;--card2:#2c2c2e;--fg:#f5f5f7;--sub:#98989d;--acc:#002FA7;--accL:#5B8CFF;--pop:#FF7A1A;--ok:#30d158;--warn:#ffd60a;--err:#ff453a;--line:#2c2c2e}
+*{box-sizing:border-box}::selection{background:rgba(0,47,167,.55)}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased}
 .wrap{max-width:1140px;margin:0 auto;padding:32px 28px}
 h1{font-size:26px;font-weight:700;letter-spacing:-.02em;margin:0 0 2px}
@@ -1505,22 +1505,22 @@ td{text-align:left;padding:11px 20px;border-top:1px solid var(--line);font-size:
 tr:hover td{background:rgba(255,255,255,.025)}
 .b{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:500}
 .done{background:rgba(48,209,88,.16);color:var(--ok)}.nomatch{background:rgba(255,214,10,.14);color:var(--warn)}
-.searching{background:rgba(10,132,255,.16);color:#64a8ff}.err{background:rgba(255,69,58,.15);color:var(--err)}
+.searching{background:rgba(0,47,167,.30);color:var(--accL)}.err{background:rgba(255,69,58,.15);color:var(--err)}
 .name{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.name a{color:var(--fg);text-decoration:none}.name a:hover{color:var(--acc)}
-a{color:var(--acc);text-decoration:none}
-.src{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;background:rgba(10,132,255,.13);color:#64a8ff;font-weight:500}
+.name a{color:var(--fg);text-decoration:none}.name a:hover{color:var(--accL)}
+a{color:var(--accL);text-decoration:none}
+.src{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;background:rgba(0,47,167,.28);color:var(--accL);font-weight:500}
 .mut{color:var(--sub)}.r{text-align:right}
 .rs{display:flex;gap:6px}
 .rs input{background:var(--card2);border:none;color:var(--fg);border-radius:8px;padding:6px 10px;font-size:12px;width:130px;outline:none}
-.rs input:focus{box-shadow:0 0 0 2.5px rgba(10,132,255,.45)}
+.rs input:focus{box-shadow:0 0 0 2.5px rgba(91,140,255,.55)}
 .rs button{background:var(--acc);color:#fff;border:0;border-radius:980px;padding:5px 13px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;transition:.15s}
 .rs button:hover{filter:brightness(1.12)}
 #toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(6px);background:rgba(44,44,46,.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);color:#fff;padding:11px 20px;border-radius:14px;font-size:13px;font-weight:500;opacity:0;transition:.3s cubic-bezier(.2,.8,.3,1);pointer-events:none;box-shadow:0 8px 30px rgba(0,0,0,.45)}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .searchbar{display:flex;gap:10px;padding:2px 20px 12px}
 .searchbar input{flex:1;background:var(--card2);border:none;color:var(--fg);border-radius:12px;padding:12px 16px;font-size:15px;outline:none;transition:.18s}
-.searchbar input:focus{box-shadow:0 0 0 3px rgba(10,132,255,.45)}
+.searchbar input:focus{box-shadow:0 0 0 3px rgba(91,140,255,.55)}
 .searchbar input::placeholder{color:#636366}
 .searchbar button{background:var(--acc);color:#fff;border:0;border-radius:12px;padding:12px 26px;font-size:14px;font-weight:600;cursor:pointer;transition:.15s}
 .searchbar button:hover{filter:brightness(1.12)}.searchbar button:active{transform:scale(.97)}
@@ -1541,7 +1541,7 @@ a{color:var(--acc);text-decoration:none}
 .pname{font-size:13px;font-weight:600;margin-top:9px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;letter-spacing:-.01em}
 .pmeta{font-size:11px;color:var(--sub);margin-top:3px}
 .pbar{height:5px;background:var(--card2);border-radius:3px;margin-top:8px;overflow:hidden}
-.pbar i{display:block;height:100%;background:var(--acc);border-radius:3px;transition:width .5s ease}
+.pbar i{display:block;height:100%;background:var(--pop);border-radius:3px;transition:width .5s ease}
 .pbar i.full{background:var(--ok)}
 .grpsec{border-top:1px solid var(--line);margin-top:6px}
 .gt{font-size:15px;font-weight:600;margin-bottom:4px;letter-spacing:-.01em}
@@ -1551,7 +1551,7 @@ a{color:var(--acc);text-decoration:none}
 .dph{width:58px;height:87px;border-radius:10px;background:var(--card2);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:24px}
 .dtt{font-size:14px;font-weight:600;letter-spacing:-.01em}.dtt .mut{font-weight:400;font-size:12px}
 </style></head><body><div class=wrap>
-<h1>🌱 PackSeed</h1><div class=sub>搜索下载 · 刮削入库 · 转种保种 · 全站辅种 —— 全自动</div>
+<h1>🌊 观澜</h1><div class=sub>观影观澜 · 搜索 / 下载 / 刮削 / 保种 / 辅种 —— 一个人的影音港湾</div>
 <div class=tabs>
 <a href="#search" class="tabbtn" data-t="search">🔍 搜索下载</a>
 <a href="#dl" class="tabbtn" data-t="dl">⬇️ 下载管理</a>
@@ -1590,7 +1590,7 @@ a{color:var(--acc);text-decoration:none}
 <div id=tab-logs class=tab>
 <div class=card><h2>最近活动</h2><table><tr><th style=width:150px>时间</th><th>消息</th></tr>{{LOGS}}</table></div>
 </div>
-<div class=sub style=text-align:center>PackSeed · 一个人的 PT 全家桶 · MIT 开源</div>
+<div class=sub style=text-align:center>观澜 GuanLan · 一个人的影音港湾 · MIT 开源</div>
 </div><div id=toast></div>
 <script>
 var _dlT=null;
@@ -1745,7 +1745,7 @@ function pollJob(id,box,t0){
   if(!j.done){
    var el=Math.round((Date.now()-t0)/1000);
    var wrap=document.createElement('div');wrap.style.cssText='padding:10px 16px;font-size:13px;line-height:1.8';
-   var tm=document.createElement('div');tm.style.cssText='color:var(--acc);font-weight:600;margin-bottom:4px';
+   var tm=document.createElement('div');tm.style.cssText='color:var(--accL);font-weight:600;margin-bottom:4px';
    tm.textContent='⏱ 搜索进行中 · 已用 '+el+' 秒';wrap.appendChild(tm);
    (j.log||[]).forEach(function(m,i){
     var ln=document.createElement('div');ln.style.color=(i==j.log.length-1)?'var(--fg)':'var(--sub)';
@@ -1782,14 +1782,14 @@ function reid(h,el){
 </script></body></html>"""
 
 DETAIL = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>种子详情 · PackSeed</title><style>
-:root{--bg:#000;--card:#1c1c1e;--card2:#2c2c2e;--fg:#f5f5f7;--sub:#98989d;--acc:#0a84ff;--ok:#30d158;--warn:#ffd60a;--line:#2c2c2e}
+<title>种子详情 · 观澜</title><style>
+:root{--bg:#000;--card:#1c1c1e;--card2:#2c2c2e;--fg:#f5f5f7;--sub:#98989d;--acc:#002FA7;--accL:#5B8CFF;--pop:#FF7A1A;--ok:#30d158;--warn:#ffd60a;--line:#2c2c2e}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased}
-.wrap{max-width:840px;margin:0 auto;padding:32px 28px}a{color:var(--acc);text-decoration:none}
+.wrap{max-width:840px;margin:0 auto;padding:32px 28px}a{color:var(--accL);text-decoration:none}
 .back{font-size:13px;font-weight:500}.title{font-size:19px;font-weight:700;margin:14px 0 4px;word-break:break-all;letter-spacing:-.02em}
 .card{background:var(--card);border-radius:18px;padding:18px 20px;margin:16px 0}
 .kv{display:grid;grid-template-columns:92px 1fr;gap:8px 16px;font-size:14px}.kv .k{color:var(--sub)}
-.src{display:inline-block;padding:2px 11px;border-radius:20px;font-size:13px;background:rgba(10,132,255,.13);color:#64a8ff;font-weight:500}
+.src{display:inline-block;padding:2px 11px;border-radius:20px;font-size:13px;background:rgba(0,47,167,.28);color:var(--accL);font-weight:500}
 .big{display:inline-block;padding:2px 13px;border-radius:20px;font-size:15px;font-weight:700;background:rgba(48,209,88,.16);color:var(--ok)}
 h2{font-size:15px;font-weight:600;margin:0 0 4px}.card h2{margin-bottom:12px}
 table{width:100%;border-collapse:collapse}th{color:var(--sub);font-weight:500;font-size:12px;text-align:left;padding:8px 6px;border-top:none}
@@ -1805,7 +1805,7 @@ td{text-align:left;padding:9px 6px;border-top:1px solid var(--line);font-size:13
 </div></div>
 <div class=card><h2>辅种去向 · 这份数据同时在这些站做种</h2>
 <table><tr><th>站点</th><th>方式</th><th>结果</th></tr>{{MROWS}}</table></div>
-<div class=mut style=text-align:center;font-size:12px>PackSeed · 自制辅种</div>
+<div class=mut style=text-align:center;font-size:12px>观澜 GuanLan</div>
 </div></body></html>"""
 
 _DLMETA = {}
