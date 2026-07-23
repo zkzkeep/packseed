@@ -39,6 +39,7 @@ CFG = {
     "NOTIFY_END":   int(os.environ.get("NOTIFY_END", "22")),
     "WECOM_TOKEN":  os.environ.get("WECOM_TOKEN", ""),     # 企微回调 Token(双向交互)
     "WECOM_AESKEY": os.environ.get("WECOM_AESKEY", ""),    # 企微回调 EncodingAESKey(43位)
+    "PUBLIC_URL":   os.environ.get("PUBLIC_URL", ""),      # 面板公网地址(图文通知的海报要外网可达)
     # —— 整理器（识别+刮削入库）——
     "TMDB_KEY":     os.environ.get("TMDB_KEY", ""),
     "TMDB_PROXY":   os.environ.get("TMDB_PROXY", ""),      # TMDB 走代理(国内需要)，如 http://x:7890
@@ -108,31 +109,52 @@ def _wecom_opener():
         urllib.request.ProxyHandler({"http": CFG["TMDB_PROXY"], "https": CFG["TMDB_PROXY"]}) if CFG["TMDB_PROXY"] else urllib.request.ProxyHandler({}),
         urllib.request.HTTPSHandler(context=ctx))
 
-def _notify_try(title, text):
-    """单轮尝试(内部4次)。成功返回True。链路(dmit→腾讯跨境)天然丢包,失败进队列重投"""
+def _wecom_send(payload):
+    """发送任意企微消息(4次尝试)。链路(dmit→腾讯跨境)天然丢包,失败由队列重投"""
     base = (CFG["WECOM_PROXY"] or "https://qyapi.weixin.qq.com").rstrip("/")
-    op = _wecom_opener(); last = ""
+    op = _wecom_opener()
+    payload = dict(payload); payload.update({"touser": "@all", "agentid": int(CFG["WECOM_AGENTID"])})
     for attempt in range(4):
         try:
             if time.time() > _WECOM["exp"] or not _WECOM["tok"]:
                 d = json.load(op.open(
                     f"{base}/cgi-bin/gettoken?corpid={CFG['WECOM_CORPID']}&corpsecret={CFG['WECOM_SECRET']}", timeout=12))
                 _WECOM["tok"] = d.get("access_token", ""); _WECOM["exp"] = time.time() + 6600
-            content = (title + ("\n" + text if text else "")).strip()
-            body = json.dumps({"touser": "@all", "msgtype": "text", "agentid": int(CFG["WECOM_AGENTID"]),
-                               "text": {"content": content}}).encode()
             r = json.load(op.open(urllib.request.Request(
-                f"{base}/cgi-bin/message/send?access_token={_WECOM['tok']}", data=body,
+                f"{base}/cgi-bin/message/send?access_token={_WECOM['tok']}", data=json.dumps(payload).encode(),
                 headers={"Content-Type": "application/json"}), timeout=12))
             if r.get("errcode") == 0:
                 return True
-            last = str(r.get("errmsg", ""))[:50]
             if r.get("errcode") in (40014, 42001, 41001):
                 _WECOM["tok"] = ""; _WECOM["exp"] = 0
-        except Exception as e:
-            last = str(e)[:50]
+        except Exception:
+            pass
         time.sleep(2)
     return False
+
+def _notify_try(title, text):
+    content = (title + ("\n" + text if text else "")).strip()
+    return _wecom_send({"msgtype": "text", "text": {"content": content}})
+
+def poster_url(p):
+    """TMDB poster path → 公网可达的海报直链(手机上企微能加载)"""
+    if not p: return ""
+    if p.startswith("http"): return p            # iTunes 等直链
+    if CFG["PUBLIC_URL"]:
+        return CFG["PUBLIC_URL"].rstrip("/") + "/api/poster?p=" + urllib.parse.quote(p)
+    return ""
+
+def notify_news(articles):
+    """图文卡片通知(带海报)。articles: [{title,description,url,picurl}] 最多8条"""
+    if not (CFG["WECOM_CORPID"] and CFG["WECOM_SECRET"] and CFG["WECOM_AGENTID"]):
+        return
+    h = time.localtime().tm_hour
+    if not (CFG["NOTIFY_START"] <= h < CFG["NOTIFY_END"]):
+        return
+    arts = articles[:8]
+    if not _wecom_send({"msgtype": "news", "news": {"articles": arts}}):
+        _NQUEUE.append(("__news__", json.dumps(arts, ensure_ascii=False), time.time()))
+        logmsg("WARN", f"图文通知暂未达,入队重投({len(_NQUEUE)}条)")
 
 def notify(title, text=""):
     """企业微信推送。免打扰时段外静默;当场发不出去进队列由后台必达重投"""
@@ -154,7 +176,9 @@ def notify_worker():
                 title, text, ts = _NQUEUE[0]
                 if time.time() - ts > 3600:
                     _NQUEUE.pop(0); continue
-                if _notify_try(title, text):
+                ok = (_wecom_send({"msgtype": "news", "news": {"articles": json.loads(text)}})
+                      if title == "__news__" else _notify_try(title, text))
+                if ok:
                     _NQUEUE.pop(0); logmsg("INFO", f"队列通知补投成功,剩{len(_NQUEUE)}条")
                 else:
                     break
@@ -316,8 +340,18 @@ def _chat_search(q):
         if not gs:
             notify(f"「{q}」没搜到资源", "换个关键词试试"); return
         _CHAT["groups"] = gs; _CHAT["ts"] = time.time(); _CHAT["q"] = q
-        lines = [f"{i+1}. {_chat_label(g)}" for i, g in enumerate(gs)]
-        notify(f"🔍「{q}」找到 {len(gs)} 个,回复数字下载:", "\n".join(lines))
+        arts = []
+        for i, g in enumerate(gs):
+            pic = poster_url(g.get("posterurl") or g.get("poster") or "")
+            top = (g.get("results") or [{}])[0]
+            mt = {"tv": "剧集", "movie": "电影", "music": "音乐", "anime": "动漫"}.get(g.get("cat") or g.get("mtype"), "其他")
+            yr = f" ({g['year']})" if g.get("year") else ""
+            arts.append({"title": f"{i+1}. {g['name']}{yr}",
+                         "description": f"{mt} · {len(g.get('results', []))}个种 · 最高做种{top.get('seeders', 0)} · 回复 {i+1} 下载",
+                         "url": CFG["PUBLIC_URL"] or "https://seed.leesy.cc",
+                         "picurl": pic})
+        notify_news(arts)
+        notify(f"🔍「{q}」共 {len(gs)} 个结果", "回复对应数字开始下载(15分钟内有效)")
     except Exception as e:
         notify("❌ 搜索出错", str(e)[:50])
 
@@ -1029,7 +1063,13 @@ def do_organize(ih, name, files, m, cat):
     c = db(); c.execute("UPDATE media SET target=?, files=?, status='done' WHERE info_hash=?", (dest, n, ih)); c.commit(); c.close()
     logmsg("INFO", f"入库 {m['tmdb_name']} ({m['year']}) ← {name[:36]} | {n}个文件 → {dest}")
     emby_refresh()
-    notify(f"📥 已入库 · {m['tmdb_name']} ({m['year']})", f"{cat} · {n}个文件,Emby可看\n{name[:56]}")
+    pic = poster_url(m.get("poster") or "")
+    if pic:
+        notify_news([{"title": f"📥 已入库 · {m['tmdb_name']} ({m['year']})",
+                      "description": f"{cat} · {n}个文件,Emby可看",
+                      "url": CFG["PUBLIC_URL"] or "https://seed.leesy.cc", "picurl": pic}])
+    else:
+        notify(f"📥 已入库 · {m['tmdb_name']} ({m['year']})", f"{cat} · {n}个文件,Emby可看\n{name[:56]}")
     return dest, n
 
 def hold_media(ih, name, cat, reason):
@@ -1896,6 +1936,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(s):
         if s.path.startswith("/api/wecom"):
             s._wecom_get(); return
+        if s.path.startswith("/api/poster"):
+            s._poster(); return          # 公开海报,免登录(图文通知的图要外网可达)
         if not s._auth_ok():
             return
         if s.path.startswith("/research"):
