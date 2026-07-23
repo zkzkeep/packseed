@@ -562,17 +562,17 @@ def fetch_lyrics(files, root):
         album = parts[-2] if len(parts) >= 2 else ""
         m = re.match(r'^(.{1,24}?)\s*[-–]\s', parts[0])
         artist = m.group(1).strip() if m else ""
-        try:
-            u = CFG["LRCAPI_URL"].rstrip("/") + "/lyrics?" + urllib.parse.urlencode(
-                {"title": title, "artist": artist, "album": album})
-            txt = urllib.request.urlopen(u, timeout=12).read().decode("utf-8", "ignore")
-            if "[0" in txt:                      # 有时间轴才算真歌词
-                open(dst, "w", encoding="utf-8").write(txt)
-                try: os.chown(dst, int(os.environ.get("PUID","1000")), int(os.environ.get("PGID","1001")))
-                except Exception: pass
-                got += 1
-        except Exception:
-            continue
+        for params in ({"title": title, "artist": artist, "album": album}, {"title": title}):
+            try:
+                u = CFG["LRCAPI_URL"].rstrip("/") + "/lyrics?" + urllib.parse.urlencode(params)
+                txt = urllib.request.urlopen(u, timeout=12).read().decode("utf-8", "ignore")
+                if "[0" in txt:                  # 有时间轴才算真歌词
+                    open(dst, "w", encoding="utf-8").write(txt)
+                    try: os.chown(dst, int(os.environ.get("PUID","1000")), int(os.environ.get("PGID","1001")))
+                    except Exception: pass
+                    got += 1; break
+            except Exception:
+                continue
     return got
 
 def fetch_covers(files, root):
