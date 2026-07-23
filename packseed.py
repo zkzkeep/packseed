@@ -1483,7 +1483,7 @@ def scanner():
 
 # ============ 网页仪表盘 ============
 PAGE = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>观澜 GuanLan</title><style>
+<title>观澜 GuanLan</title><link rel="icon" href="/favicon.ico" type="image/svg+xml"><style>
 :root{--ikb:#002FA7;--acc:#ffffff;--accL:#CFE0FF;--pop:#FFD400;--ok:#3ddc84;--warn:#ffd83d;--err:#ff8579;--fg:#fff;--sub:rgba(255,255,255,.68);--line:rgba(255,255,255,.24);--card:rgba(255,255,255,.17);--card2:rgba(255,255,255,.26)}
 *{box-sizing:border-box}::selection{background:rgba(255,255,255,.3)}
 body{margin:0;color:#fff;font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased;
@@ -1897,7 +1897,7 @@ function reid(h,el){
 </script></body></html>"""
 
 DETAIL = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>种子详情 · 观澜</title><style>
+<title>种子详情 · 观澜</title><link rel="icon" href="/favicon.ico" type="image/svg+xml"><style>
 :root{--ikb:#002FA7;--acc:#fff;--accL:#CFE0FF;--ok:#3ddc84;--warn:#ffd83d;--fg:#fff;--sub:rgba(255,255,255,.68);--line:rgba(255,255,255,.24);--card:rgba(255,255,255,.17)}
 *{box-sizing:border-box}body{margin:0;color:#fff;font:14px/1.6 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased;
 background:linear-gradient(180deg,#0039c8 0%,#002FA7 38%,#001d77 100%);background-attachment:fixed;background-color:#002FA7}
@@ -2110,6 +2110,13 @@ def _sjob_run(jid, q):
         log(f"❌ 失败: {str(e)[:60]}")
     job["done"] = True
 
+FAVICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+ '<rect width="64" height="64" rx="14" fill="#002FA7"/>'
+ '<circle cx="46" cy="17" r="7.5" fill="#FFD400"/>'
+ '<path d="M2 37c7-9 15-9 21 0s15 9 21 0 12-8 18-3v30H2z" fill="#ffffff" opacity="0.95"/>'
+ '<path d="M2 47c7-7 13-7 19 0s15 7 21 0 14-7 20-1v18H2z" fill="#CFE0FF" opacity="0.9"/>'
+ '</svg>').encode()
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(s, *a): pass
     def _auth_ok(s):
@@ -2152,6 +2159,11 @@ class Handler(BaseHTTPRequestHandler):
             s._poster(); return          # 公开海报,免登录(图文通知的图要外网可达)
         if s.path.startswith("/api/bg"):
             s._bg(); return              # 首页海浪背景图,免登录
+        if s.path.startswith("/favicon"):
+            s.send_response(200); s.send_header("Content-Type", "image/svg+xml")
+            s.send_header("Cache-Control", "max-age=604800")
+            s.send_header("Content-Length", str(len(FAVICON_SVG)))
+            s.end_headers(); s.wfile.write(FAVICON_SVG); return
         if not s._auth_ok():
             return
         if s.path.startswith("/research"):
