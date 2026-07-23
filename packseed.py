@@ -896,7 +896,18 @@ function pollDl(){
     var i=document.createElement('div');i.className='mut';i.style.cssText='font-size:12px;margin-top:6px';
     i.textContent=(SM[t.state]||t.state)+' · '+t.sizeh+' · '+t.speed+(t.eta?' · 剩'+t.eta:'')+' · 做种'+t.seeds+' · '+t.progress+'%';
     col.appendChild(tt);col.appendChild(pb);col.appendChild(i);
-    row.appendChild(col);el.appendChild(row);
+    row.appendChild(col);
+    var cx=document.createElement('button');cx.className='dlbtn';cx.style.cssText='background:transparent;border:1px solid var(--line);color:var(--sub);flex-shrink:0';
+    cx.textContent='✕ 取消';
+    cx.onclick=function(){
+     if(!confirm('取消下载「'+(t.tmdb||t.name.slice(0,30))+'」?\n将从 qb 移除任务并删除已下载的数据。'))return;
+     cx.disabled=true;cx.textContent='取消中…';
+     fetch('/api/canceldl?hash='+encodeURIComponent(t.hash)).then(r=>r.json()).then(function(d){
+      if(d.ok){toast('已取消并清理');pollDl();}
+      else{toast('取消失败：'+(d.err||''));cx.disabled=false;cx.textContent='✕ 取消';}
+     }).catch(()=>{cx.disabled=false;cx.textContent='✕ 取消';});
+    };
+    row.appendChild(cx);el.appendChild(row);
    });
   }
   var dd=document.getElementById('ddone');if(!dd)return;
@@ -1096,6 +1107,8 @@ class Handler(BaseHTTPRequestHandler):
             s._poster(); return
         if s.path.startswith("/api/downloads"):
             s._downloads(); return
+        if s.path.startswith("/api/canceldl"):
+            s._canceldl(); return
         if s.path.startswith("/api"):
             s._json(); return
         c = db()
@@ -1249,6 +1262,19 @@ class Handler(BaseHTTPRequestHandler):
         # 海报墙按最高做种数排(结果本身已按做种降序,首个即最高)
         glist = sorted(groups.values(), key=lambda g: -(g["results"][0]["seeders"] if g["results"] else 0))
         s._send_json({"ok": True, "groups": glist, "other": other})
+    def _canceldl(s):
+        from urllib.parse import urlparse, parse_qs
+        h = (parse_qs(urlparse(s.path).query).get("hash",[""])[0]).strip()
+        if not h: s._send_json({"ok":False,"err":"缺hash"}); return
+        try:
+            qb = QB()
+            t = next((x for x in qb.torrents() if x.get("hash")==h), None)
+            qb.delete(h, delete_files=True)   # 删任务+已下数据(取消=不要了)
+            _DLMETA.pop(h, None)
+            logmsg("INFO", f"用户取消下载: {(t or {}).get('name','')[:44]}")
+            s._send_json({"ok":True})
+        except Exception as e:
+            s._send_json({"ok":False,"err":str(e)[:60]})
     def _downloads(s):
         out = {"dl": [], "done": []}
         try:
@@ -1259,7 +1285,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif eta >= 60: etas = f"{eta//60}分{eta%60}秒"
                 else: etas = f"{eta}秒"
                 meta = _dlmeta(t.get("hash",""), t.get("name",""))
-                out["dl"].append({"name": t.get("name",""), "progress": round(prog*100, 1),
+                out["dl"].append({"hash": t.get("hash",""), "name": t.get("name",""), "progress": round(prog*100, 1),
                                   "sizeh": human_size(t.get("size",0)), "speed": human_size(t.get("dlspeed",0))+"/s",
                                   "eta": etas, "state": t.get("state",""), "seeds": t.get("num_seeds",0),
                                   "tmdb": meta["tmdb"], "year": meta["year"], "poster": meta["poster"]})
