@@ -83,6 +83,8 @@ def init_db():
         first_seen INTEGER, last_searched INTEGER)""")
     try: c.execute("ALTER TABLE torrents ADD COLUMN source TEXT")   # 来源站
     except Exception: pass
+    try: c.execute("ALTER TABLE media ADD COLUMN poster TEXT")      # 首页最近入库海报
+    except Exception: pass
     c.execute("""CREATE TABLE IF NOT EXISTS matches(
         id INTEGER PRIMARY KEY AUTOINCREMENT, info_hash TEXT, indexer TEXT,
         matched_name TEXT, mode TEXT, result TEXT, ts INTEGER)""")
@@ -994,8 +996,8 @@ def organize_music(ih, name, files):
         for r_, ds, _fs in os.walk(top): os.chown(r_, uid, gid)
     except Exception: pass
     c = db()
-    c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-              (ih, name, "音乐", "music", None, name[:60], "", root, "music", "done", n, int(time.time())))
+    c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts,poster) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              (ih, name, "音乐", "music", None, name[:60], "", root, "music", "done", n, int(time.time()), ""))
     c.commit(); c.close()
     lrc = fetch_lyrics(files, root)
     cov = fetch_covers(files, root)
@@ -1144,8 +1146,8 @@ def emby_refresh():
 def do_organize(ih, name, files, m, cat):
     """执行硬链接入库并记录。files: [(绝对源路径, 相对路径)]"""
     c = db()
-    c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-              (ih, name, cat, m["mtype"], m["id"], m["tmdb_name"], m["year"], "", m["conf"], "processing", len(files), int(time.time())))
+    c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts,poster) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              (ih, name, cat, m["mtype"], m["id"], m["tmdb_name"], m["year"], "", m["conf"], "processing", len(files), int(time.time()), m.get("poster") or ""))
     c.commit(); c.close()
     dest, n = organize_files(files, m, cat)
     try:
@@ -1167,8 +1169,8 @@ def do_organize(ih, name, files, m, cat):
 
 def hold_media(ih, name, cat, reason):
     c = db()
-    c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-              (ih, name, cat, "", None, "", "", "", "", "hold", 0, int(time.time())))
+    c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts,poster) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              (ih, name, cat, "", None, "", "", "", "", "hold", 0, int(time.time()), ""))
     c.commit(); c.close()
     logmsg("WARN", f"整理待确认({reason}): {name[:44]}")
     notify("⚠️ 入库待确认", f"{name[:56]}\n{reason},去面板『整理入库』填片名或TMDB id一键入库")
@@ -1550,6 +1552,19 @@ a{color:var(--accL);text-decoration:none}
 .dpos{width:58px;height:87px;object-fit:cover;border-radius:10px;background:var(--card2);flex-shrink:0;box-shadow:0 3px 10px rgba(0,0,0,.35)}
 .dph{width:58px;height:87px;border-radius:10px;background:var(--card2);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:24px}
 .dtt{font-size:14px;font-weight:600;letter-spacing:-.01em}.dtt .mut{font-weight:400;font-size:12px}
+.hero{position:relative;text-align:center;padding:42px 16px 26px;background:radial-gradient(ellipse 55% 90% at 50% 0%,rgba(0,47,167,.42),transparent 72%)}
+.herotitle{font-size:26px;font-weight:700;letter-spacing:-.02em;margin-bottom:22px}
+.herotitle .mut{font-weight:400;font-size:14px}
+.hero .searchbar{max-width:780px;margin:0 auto;padding:0}
+.hero .searchbar input{padding:17px 24px;font-size:16px;border-radius:16px;background:rgba(28,28,30,.85);backdrop-filter:blur(10px)}
+.hero .searchbar button{padding:0 36px;font-size:16px;border-radius:16px}
+.hero .fbar{justify-content:center;padding:16px 0 0}
+#sresult:not(:empty){background:var(--card);border-radius:18px;margin-bottom:20px;overflow:hidden}
+.rstrip{display:flex;gap:14px;padding:12px 20px 20px;overflow-x:auto;scrollbar-width:thin}
+.rcard{flex:0 0 108px}
+.rcard img{width:108px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--card2);box-shadow:0 4px 14px rgba(0,0,0,.4);display:block}
+.rname{font-size:12px;font-weight:600;margin-top:7px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ryear{font-size:11px;color:var(--sub);margin-top:1px}
 </style></head><body><div class=wrap>
 <h1>🌊 观澜</h1><div class=sub>观影观澜 · 搜索 / 下载 / 刮削 / 保种 / 辅种 —— 一个人的影音港湾</div>
 <div class=tabs>
@@ -1564,16 +1579,19 @@ a{color:var(--accL);text-decoration:none}
 <div class=card><h2>最近完成的流水线</h2><div id=ddone></div></div>
 </div>
 <div id=tab-search class=tab>
-<div class=card><h2>🔍 搜索下载 <span class=mut style=font-weight:400>· 选类型缩小范围 · 海报墙点选 · 一键下到 qb</span></h2>
-<div class=searchbar><input id=q placeholder="输入片名，回车搜索" onkeydown="if(event.key=='Enter')doSearch()"><button onclick=doSearch()>搜索</button></div>
-<div class=fbar><span class=mut style=font-size:12px>类型:</span>
+<div class=hero>
+<div class=herotitle>今晚观什么澜?<div class=mut style="margin-top:6px">全站搜索 · 海报点选 · 一键下载,剩下的交给流水线</div></div>
+<div class=searchbar><input id=q placeholder="片名 / 剧名 / 专辑,回车即搜" onkeydown="if(event.key=='Enter')doSearch()"><button onclick=doSearch()>搜索</button></div>
+<div class=fbar>
 <span class=fpill data-f=movie onclick=tgF(this)>🎬 电影</span>
 <span class=fpill data-f=tv onclick=tgF(this)>📺 电视剧</span>
 <span class=fpill data-f=anime onclick=tgF(this)>🎌 动漫</span>
 <span class=fpill data-f=book onclick=tgF(this)>📖 漫画/书</span>
 <span class=fpill data-f=music onclick=tgF(this)>🎵 音乐</span>
-<span class=mut style=font-size:12px>· 搜完点着切换,不用重搜 · 不选=全部</span></div>
-<div id=sresult></div></div>
+</div>
+</div>
+<div id=sresult></div>
+<div class=card><h2>🎬 最近入库</h2><div class=rstrip>{{RECENT}}</div></div>
 </div>
 <div id=tab-media class=tab>
 <div class=card><h2>📥 整理入库 <span class=mut style=font-weight:400>· 下载完成自动识别→硬链接进 Emby 媒体库 · 待确认的可手动填 TMDB id/片名</span></h2><table><tr><th>下载名</th><th>分类</th><th>识别为</th><th>状态</th><th>目标/操作</th></tr>{{MEDIA}}</table></div>
@@ -2088,6 +2106,10 @@ class Handler(BaseHTTPRequestHandler):
                            f"<td>{cmap.get(cat,'')}{esc(cat or '')}</td>"
                            f"<td>{esc((tn+' ('+(yr or '')+')') if tn else '—')}</td>"
                            f"<td><span class='b {cls}'>{esc(lbl)}</span></td><td>{fix}</td></tr>")
+        recent = ""
+        for r in c.execute("SELECT tmdb_name,year,poster FROM media WHERE status='done' AND poster IS NOT NULL AND poster != '' ORDER BY ts DESC LIMIT 14").fetchall():
+            recent += (f"<div class=rcard><img loading=lazy src='/api/poster?p={urllib.parse.quote(r[2])}'>"
+                       f"<div class=rname>{esc(r[0])}</div><div class=ryear>{esc(r[1] or '')}</div></div>")
         logs = ""
         for r in c.execute("SELECT ts,level,msg FROM log ORDER BY id DESC LIMIT 40").fetchall():
             logs += f"<tr><td class=mut>{time.strftime('%m-%d %H:%M:%S', time.localtime(r[0]))}</td><td>{esc(r[2])}</td></tr>"
@@ -2097,9 +2119,12 @@ class Handler(BaseHTTPRequestHandler):
                     .replace("{{DONE}}", str(t_done)).replace("{{NOMATCH}}", str(t_nomatch))
                     .replace("{{ROWS}}", rows or "<tr><td colspan=6 class=mut>暂无记录，等待首次扫描…</td></tr>")
                     .replace("{{MEDIA}}", media_rows or "<tr><td colspan=5 class=mut>暂无入库记录</td></tr>")
+                    .replace("{{RECENT}}", recent or "<div class=mut style='padding:4px 0 8px'>还没有带海报的入库记录,下一部片就有了</div>")
                     .replace("{{LOGS}}", logs or "<tr><td colspan=2 class=mut>—</td></tr>"))
         b = html.encode("utf-8")
-        s.send_response(200); s.send_header("Content-Type","text/html; charset=utf-8"); s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b)
+        s.send_response(200); s.send_header("Content-Type","text/html; charset=utf-8")
+        s.send_header("Cache-Control","no-cache, no-store, must-revalidate")
+        s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b)
     def _detail(s):
         from urllib.parse import urlparse, parse_qs
         h = (parse_qs(urlparse(s.path).query).get("hash",[""])[0]).strip()
