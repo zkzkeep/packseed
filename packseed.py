@@ -35,6 +35,7 @@ CFG = {
     "MEDIA_TV":     os.environ.get("MEDIA_TV", "/data/media/tv"),
     "MEDIA_MOVIE":  os.environ.get("MEDIA_MOVIE", "/data/media/movies"),
     "MEDIA_ANIME":  os.environ.get("MEDIA_ANIME", ""),     # 动漫库根，留空则动漫也归到 tv
+    "MEDIA_MUSIC":  os.environ.get("MEDIA_MUSIC", "/data/media/music"),  # 音乐库根(Navidrome 的库)
     "EMBY_URL":     os.environ.get("EMBY_URL", ""),
     "EMBY_KEY":     os.environ.get("EMBY_KEY", ""),
     "ORGANIZE":     os.environ.get("ORGANIZE", "1") == "1",  # 下载完成自动整理入库+转种
@@ -458,8 +459,13 @@ def tmdb_by_id(tid, mtype_hint=""):
         except Exception: pass
     return None
 
+def meta_is_music(n):
+    return bool(re.search(r'\b(FLAC|APE|WAV|DSD|DSF|SACD|MQA|24bit|24-96|24-192|Hi-?Res|无损|MP3|320K)\b', n, re.I)
+                and not re.search(r'\b(\d{3,4}[pi]|x26[45]|HEVC|BluRay|WEB-?DL|REMUX)\b', n, re.I))
+
 def media_category(name, m):
-    """qb 分类：动漫 > 电视剧 > 电影"""
+    """qb 分类：音乐 > 动漫 > 电视剧 > 电影"""
+    if meta_is_music(name): return "音乐"
     if meta_is_anime(name): return "动漫"
     if m: return "电视剧" if m["mtype"]=="tv" else "电影"
     return "电视剧" if meta_is_tv(name) else "电影"
@@ -510,6 +516,28 @@ def organize_files(files, m, cat):
     except Exception:
         pass
     return dest_dir, n
+
+def organize_music(ih, name, files):
+    """音乐入库：整个种子目录结构原样硬链接进 Navidrome 音乐库。
+    不动文件名不拍平——tag 是 Navidrome 的事，歌词是 lrcapi 的事。"""
+    root = CFG["MEDIA_MUSIC"]; n = 0
+    for src_, rel in files:
+        dst = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.exists(dst): n += 1; continue
+        try: os.link(src_, dst); n += 1
+        except OSError as e: logmsg("WARN", f"硬链接失败 {os.path.basename(rel)}: {e}")
+    try:
+        uid, gid = int(os.environ.get("PUID","1000")), int(os.environ.get("PGID","1001"))
+        top = os.path.join(root, files[0][1].split("/",1)[0]) if files and "/" in files[0][1] else root
+        for r_, ds, _fs in os.walk(top): os.chown(r_, uid, gid)
+    except Exception: pass
+    c = db()
+    c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+              (ih, name, "音乐", "music", None, name[:60], "", root, "music", "done", n, int(time.time())))
+    c.commit(); c.close()
+    logmsg("INFO", f"音乐入库 {name[:44]} | {n}个文件 → {root} (Navidrome每小时自动扫)")
+    return root, n
 
 def emby_refresh():
     if not (CFG["EMBY_URL"] and CFG["EMBY_KEY"]): return
@@ -568,6 +596,10 @@ def process_completed(qb, t):
         files = [(os.path.join(sp, f["name"]), f["name"]) for f in qb.files(ih)]
     except Exception as e:
         logmsg("ERROR", f"取qb文件列表失败 {name[:30]}: {e}"); return
+    if t.get("category") == "音乐" or meta_is_music(name):
+        try: organize_music(ih, name, files)
+        except Exception as e: logmsg("ERROR", f"音乐入库异常 {name[:30]}: {e}")
+        transfer_to_tr(qb, ih, name, sp); return
     m = tmdb_match(name)
     cat = media_category(name, m)
     if m and m["conf"] in ("high", "mid"):
@@ -959,7 +991,7 @@ function mkTable(rs){
   var c2=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=x.site;c2.appendChild(sp);
   var c3=document.createElement('td');c3.className='r';c3.textContent=x.sizeh;
   var c4=document.createElement('td');c4.className='r';c4.textContent=x.seeders;
-  var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x.url);};c5.appendChild(b);
+  var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x.url,x.cat);};c5.appendChild(b);
   tr.appendChild(c1);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tr.appendChild(c5);tbl.appendChild(tr);
  });
  return tbl;
@@ -1041,9 +1073,9 @@ function pollJob(id,box,t0){
   _sd=d;renderWall();
  }).catch(function(){setTimeout(function(){pollJob(id,box,t0);},2500);});
 }
-function dl(b,u){
+function dl(b,u,c){
  b.disabled=true;b.textContent='下载中…';
- fetch('/api/dl?url='+encodeURIComponent(u)).then(r=>r.json()).then(function(d){
+ fetch('/api/dl?url='+encodeURIComponent(u)+(c?'&cat='+encodeURIComponent(c):'')).then(r=>r.json()).then(function(d){
   if(d.ok){b.textContent='✅ 已下';b.style.background='var(--ok)';toast('已推送下载,点「⬇️ 下载」页看实时进度');}
   else{b.textContent='失败';b.disabled=false;toast('下载失败：'+(d.err||''));}
  }).catch(e=>{b.textContent='失败';b.disabled=false;toast('下载出错');});
@@ -1427,14 +1459,17 @@ class Handler(BaseHTTPRequestHandler):
         s.end_headers(); s.wfile.write(data)
     def _dl(s):
         from urllib.parse import urlparse, parse_qs
-        u = (parse_qs(urlparse(s.path).query).get("url",[""])[0]).strip()
+        qs_ = parse_qs(urlparse(s.path).query)
+        u = (qs_.get("url",[""])[0]).strip()
+        ucat = (qs_.get("cat",[""])[0]).strip()   # 搜索页已知的站点分类(music/book等)
         if not u: s._send_json({"ok":False,"err":"缺少下载链接"}); return
         try:
             data = prowlarr_download(u)
             if data[:1] != b'd': s._send_json({"ok":False,"err":"返回的不是种子文件"}); return
             try: cname, _ = torrent_files(data)
             except Exception: cname = ""
-            cat = CFG["QB_CATEGORY"] or media_category(cname or "", None)   # 快速启发式分类，流水线再校正
+            catmap = {"music":"音乐","anime":"动漫","tv":"电视剧","movie":"电影"}
+            cat = catmap.get(ucat) or CFG["QB_CATEGORY"] or media_category(cname or "", None)
             res = QB().add(data, category=cat, tags="packseed")
             ok = "Ok" in res
             logmsg("INFO", f"搜索下载 → qb[{cat}]: {(cname or u)[:40]} [{res.strip()[:16] or 'ok'}]")
