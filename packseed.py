@@ -1603,7 +1603,7 @@ background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba
 </div>
 <div id=tab-search class=tab>
 <div class=hero>
-<video class=herovid autoplay muted loop playsinline poster="/api/bg" src="/api/bgv"></video>
+<video class=herovid autoplay muted loop playsinline poster="/api/bg" src="/api/bgv?v=2"></video>
 <div class=herotitle>今晚观什么澜?<div class=mut style="margin-top:6px">全站搜索 · 海报点选 · 一键下载,剩下的交给流水线</div></div>
 <div class=searchbar><input id=q placeholder="片名 / 剧名 / 专辑,回车即搜" onkeydown="if(event.key=='Enter')doSearch()"><button onclick=doSearch()>搜索</button></div>
 <div class=fbar>
