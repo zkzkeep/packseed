@@ -1565,7 +1565,8 @@ background-color:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px soli
 .hero .fbar{justify-content:center;padding:18px 0 0}
 #sresult:not(:empty){background:var(--card);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:20px;margin-bottom:20px;overflow:hidden}
 .recentcard{overflow:visible}
-.rstrip{display:flex;gap:14px;padding:30px 20px 24px;overflow:visible}
+.rflow{overflow:hidden;padding:30px 0 24px;-webkit-mask-image:linear-gradient(90deg,transparent,#000 5%,#000 95%,transparent);mask-image:linear-gradient(90deg,transparent,#000 5%,#000 95%,transparent)}
+.rtrack{display:flex;gap:14px;width:max-content;padding:0 20px;will-change:transform}
 @keyframes bob{from{transform:translateY(-4px) rotate(-.5deg)}to{transform:translateY(4px) rotate(.5deg)}}
 .rbob{animation:bob 4.2s ease-in-out infinite alternate}
 .rcard:nth-child(2n) .rbob{animation-duration:5.1s;animation-delay:-1.7s}
@@ -1615,7 +1616,7 @@ background-color:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px soli
 <div class=stat><div class=n id=d-media>—</div><div class=l id=d-medial>媒体库</div></div>
 <div class=stat><div class=n style=color:var(--pop) id=d-seed>—</div><div class=l id=d-seedl>做种中</div></div>
 </div>
-<div class="card recentcard"><h2>🎬 最近入库</h2><div class=rstrip>{{RECENT}}</div></div>
+<div class="card recentcard"><h2>🎬 最近入库 <span class=mut style=font-weight:400>· 点海报看简介</span></h2><div class=rflow><div class=rtrack id=rtrack>{{RECENT}}</div></div></div>
 <div id=im-ov onclick="this.classList.remove('show')"><div id=im-box onclick="event.stopPropagation()"><img id=im-img><div><div id=im-t></div><div id=im-p></div><a id=im-a target=_blank>在 Emby 中打开 →</a></div></div></div>
 </div>
 <div id=tab-media class=tab>
@@ -1723,15 +1724,24 @@ function dockify(el){
   for(var i=0;i<cards.length;i++){cards[i].style.transform='';cards[i].style.zIndex='';}
  });
 }
-dockify(document.querySelector('.rstrip'));
-function trimStrip(){
- var el=document.querySelector('.rstrip');if(!el)return;
- var w=el.clientWidth-40, per=108+14, n=Math.max(3,Math.floor((w+14)/per));
- for(var i=0;i<el.children.length;i++){el.children[i].style.display=i<n?'':'none';}
-}
-trimStrip();window.addEventListener('resize',trimStrip);
 (function(){
- var el=document.querySelector('.rstrip');if(!el)return;
+ var flow=document.querySelector('.rflow'),track=document.getElementById('rtrack');
+ if(!flow||!track||track.children.length<2)return;
+ var setW=track.scrollWidth+14;                       // 一组的宽度(含尾部间隙)
+ if(track.scrollWidth>flow.clientWidth*0.9){          // 够长才流动+克隆无缝
+  [].slice.call(track.children).forEach(function(c){track.appendChild(c.cloneNode(true));});
+  var off=0,paused=false;
+  flow.addEventListener('mouseenter',function(){paused=true;});
+  flow.addEventListener('mouseleave',function(){paused=false;});
+  (function step(){
+   if(!paused){off+=0.4;if(off>=setW)off-=setW;track.style.transform='translateX('+(-off)+'px)';}
+   requestAnimationFrame(step);
+  })();
+ }
+ dockify(track);
+})();
+(function(){
+ var el=document.getElementById('rtrack');if(!el)return;
  el.addEventListener('click',function(e){
   var c=e.target.closest('.rcard');if(!c||!c.dataset.tid||c.dataset.tid=='0')return;
   fetch('/api/overview?mt='+c.dataset.mt+'&id='+c.dataset.tid).then(r=>r.json()).then(function(d){
