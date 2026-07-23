@@ -36,6 +36,7 @@ CFG = {
     "MEDIA_MOVIE":  os.environ.get("MEDIA_MOVIE", "/data/media/movies"),
     "MEDIA_ANIME":  os.environ.get("MEDIA_ANIME", ""),     # 动漫库根，留空则动漫也归到 tv
     "MEDIA_MUSIC":  os.environ.get("MEDIA_MUSIC", "/data/media/music"),  # 音乐库根(Navidrome 的库)
+    "LRCAPI_URL":   os.environ.get("LRCAPI_URL", ""),      # lrcapi 地址,音乐入库时自动落 .lrc 歌词
     "EMBY_URL":     os.environ.get("EMBY_URL", ""),
     "EMBY_KEY":     os.environ.get("EMBY_KEY", ""),
     "ORGANIZE":     os.environ.get("ORGANIZE", "1") == "1",  # 下载完成自动整理入库+转种
@@ -517,6 +518,33 @@ def organize_files(files, m, cat):
         pass
     return dest_dir, n
 
+def fetch_lyrics(files, root):
+    """音乐入库后调 lrcapi 给每首歌落一个同名 .lrc —— Navidrome 网页/各类客户端都能显示"""
+    if not CFG["LRCAPI_URL"]: return 0
+    got = 0
+    for _src, rel in files:
+        if os.path.splitext(rel)[1].lower() not in (".flac",".mp3",".ape",".wav",".m4a",".ogg",".wv"): continue
+        dst = os.path.join(root, os.path.splitext(rel)[0] + ".lrc")
+        if os.path.exists(dst): continue
+        base = os.path.splitext(os.path.basename(rel))[0]
+        title = re.sub(r'^\s*\d{1,3}\s*[.\-_、]?\s*', '', base).strip()
+        parts = rel.split("/")
+        album = parts[-2] if len(parts) >= 2 else ""
+        m = re.match(r'^(.{1,24}?)\s*[-–]\s', parts[0])
+        artist = m.group(1).strip() if m else ""
+        try:
+            u = CFG["LRCAPI_URL"].rstrip("/") + "/lyrics?" + urllib.parse.urlencode(
+                {"title": title, "artist": artist, "album": album})
+            txt = urllib.request.urlopen(u, timeout=12).read().decode("utf-8", "ignore")
+            if "[0" in txt:                      # 有时间轴才算真歌词
+                open(dst, "w", encoding="utf-8").write(txt)
+                try: os.chown(dst, int(os.environ.get("PUID","1000")), int(os.environ.get("PGID","1001")))
+                except Exception: pass
+                got += 1
+        except Exception:
+            continue
+    return got
+
 def organize_music(ih, name, files):
     """音乐入库：整个种子目录结构原样硬链接进 Navidrome 音乐库。
     不动文件名不拍平——tag 是 Navidrome 的事，歌词是 lrcapi 的事。"""
@@ -536,7 +564,8 @@ def organize_music(ih, name, files):
     c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
               (ih, name, "音乐", "music", None, name[:60], "", root, "music", "done", n, int(time.time())))
     c.commit(); c.close()
-    logmsg("INFO", f"音乐入库 {name[:44]} | {n}个文件 → {root} (Navidrome每小时自动扫)")
+    lrc = fetch_lyrics(files, root)
+    logmsg("INFO", f"音乐入库 {name[:44]} | {n}个文件 + {lrc}首歌词 → {root} (Navidrome每小时自动扫)")
     return root, n
 
 def emby_refresh():
