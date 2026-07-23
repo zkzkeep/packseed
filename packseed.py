@@ -75,6 +75,8 @@ def init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS matches(
         id INTEGER PRIMARY KEY AUTOINCREMENT, info_hash TEXT, indexer TEXT,
         matched_name TEXT, mode TEXT, result TEXT, ts INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS pending_seed(
+        name TEXT PRIMARY KEY, data TEXT, ts INTEGER)""")
     c.execute("""CREATE TABLE IF NOT EXISTS log(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, level TEXT, msg TEXT)""")
     # 整理入库记录
@@ -93,6 +95,34 @@ def logmsg(level, msg):
     print(f"[{level}] {msg}", flush=True)
 
 # ============ bencode ============
+import hashlib
+def bencode(x):
+    if isinstance(x, int): return b"i%de" % x
+    if isinstance(x, bytes): return b"%d:%s" % (len(x), x)
+    if isinstance(x, list): return b"l" + b"".join(bencode(i) for i in x) + b"e"
+    if isinstance(x, dict): return b"d" + b"".join(bencode(k) + bencode(v) for k, v in sorted(x.items())) + b"e"
+    raise TypeError(type(x))
+
+def torrent_infohash(data):
+    return hashlib.sha1(bencode(bdecode(data)[b"info"])).hexdigest()
+
+def torrent_announces(data):
+    top = bdecode(data); anns = []
+    if b"announce" in top: anns.append(top[b"announce"].decode("utf-8", "ignore"))
+    for tier in (top.get(b"announce-list") or []):
+        for a in tier: anns.append(a.decode("utf-8", "ignore"))
+    return [a for a in dict.fromkeys(anns) if a]
+
+def tr_add_trackers(tr, tid, anns):
+    """给现有种子追加 tracker(tr 4.x trackerList 全量覆盖,严格去重防 Invalid)"""
+    cur = tr.call("torrent-get", {"ids": [tid], "fields": ["trackerList"]})["arguments"]["torrents"][0].get("trackerList", "")
+    have = {l.strip() for l in cur.splitlines() if l.strip()}
+    new = [a for a in anns if a not in have]
+    if not new: return "duplicate"
+    tiers = [t.strip() for t in cur.split("\n\n") if t.strip()] + new
+    r2 = tr.call("torrent-set", {"ids": [tid], "trackerList": "\n\n".join(tiers)})
+    return "tracker" if r2.get("result") == "success" else "duplicate"
+
 def bdecode(data):
     def parse(i):
         c = data[i:i+1]
@@ -665,7 +695,13 @@ def process_completed(qb, t):
     if t.get("category") == "音乐" or meta_is_music(name):
         try: organize_music(ih, name, files)
         except Exception as e: logmsg("ERROR", f"音乐入库异常 {name[:30]}: {e}")
-        transfer_to_tr(qb, ih, name, sp); return
+        if transfer_to_tr(qb, ih, name, sp):
+            c = db(); row = c.execute("SELECT data FROM pending_seed WHERE name=?", (name,)).fetchone(); c.close()
+            if row:
+                try:
+                    threading.Thread(target=_preseed, args=(ih, name, json.loads(row[0])), daemon=True).start()
+                except Exception: pass
+        return
     m = tmdb_match(name)
     cat = media_category(name, m)
     if m and m["conf"] in ("high", "mid"):
@@ -676,7 +712,13 @@ def process_completed(qb, t):
             c = db(); c.execute("UPDATE media SET status='error' WHERE info_hash=?", (ih,)); c.commit(); c.close()
     else:
         hold_media(ih, name, cat, "识别置信度不足" if m else "TMDB无匹配")
-    transfer_to_tr(qb, ih, name, sp)
+    if transfer_to_tr(qb, ih, name, sp):
+        c = db(); row = c.execute("SELECT data FROM pending_seed WHERE name=?", (name,)).fetchone(); c.close()
+        if row:
+            try:
+                mates = json.loads(row[0])
+                threading.Thread(target=_preseed, args=(ih, name, mates), daemon=True).start()
+            except Exception: pass
 
 def manual_organize(ih, query):
     """待确认条目：用户给 TMDB id 或片名，重新匹配并入库。数据可能已转到 tr。"""
@@ -720,6 +762,24 @@ def manual_organize(ih, query):
     dest, n = do_organize(ih, name or "", files, m, cat)
     return {"ok": True, "name": f"{m['tmdb_name']} ({m['year']})", "n": n}
 
+def _preseed(ih, name, mates):
+    """下载时预存的同组候选辅种：不搜索,直接拿已知站点的种子来比对注入"""
+    try:
+        time.sleep(25)                      # 给 tr 校验留时间
+        tr = TR()
+        t = next((x for x in tr.torrents() if x["hashString"].lower() == ih.lower()), None)
+        if not t:
+            logmsg("WARN", f"预存辅种: tr里没找到 {name[:32]}"); return
+        cands = [{"downloadUrl": m.get("url",""), "size": m.get("size",0), "indexer": m.get("site","")} for m in mates]
+        logmsg("INFO", f"⚡ 预存辅种开跑(下载时已知 {len(cands)} 个站): {name[:36]}")
+        run_match(tr, t, [], pre_results=cands)
+    except Exception as e:
+        logmsg("ERROR", f"预存辅种异常 {name[:28]}: {e}")
+    finally:
+        try:
+            c = db(); c.execute("DELETE FROM pending_seed WHERE name=?", (name,)); c.commit(); c.close()
+        except Exception: pass
+
 def qb_watcher():
     """每分钟看一眼 qb：有下载完成的就整理+转种。比 MP 的定时插件快，自然接管。"""
     time.sleep(20)
@@ -750,7 +810,7 @@ def prowlarr_download(url):
     return urllib.request.urlopen(req, timeout=25).read()
 
 # ============ 核心：按给定关键词辅种一个种子 ============
-def run_match(tr, t, queries, manual=False):
+def run_match(tr, t, queries, manual=False, pre_results=None):
     ih = t["hashString"]; name = t["name"]; total = t["totalSize"]
     top = name; rel = {}
     for f in t.get("files", []):
@@ -777,6 +837,24 @@ def run_match(tr, t, queries, manual=False):
                 cname, cfiles = torrent_files(data)
                 if set(cfiles.items()) != local_set: continue
                 m += 1; same = (cname == top); mode = "direct" if same else "link"; res = "matched"
+                # 同 info_hash(多站挂同一个种子文件)：绝不能 tr.add(tr4会用新tracker顶掉旧的断了原站做种)，
+                # 直接给现有种子追加该站 tracker —— 一个种子同时向多站汇报(IYUU式)
+                try: chash = torrent_infohash(data)
+                except Exception: chash = ""
+                if chash and chash.lower() == ih.lower():
+                    try:
+                        res = tr_add_trackers(tr, ih, torrent_announces(data))
+                    except Exception as e:
+                        logmsg("WARN", f"加tracker失败: {str(e)[:40]}"); res = "duplicate"
+                    if res == "tracker": inj += 1
+                    mode = "tracker"
+                    c = db()
+                    c.execute("INSERT INTO matches(info_hash,indexer,matched_name,mode,result,ts) VALUES(?,?,?,?,?,?)",
+                              (ih, r.get("indexer"), cname[:120], mode, res, int(time.time())))
+                    c.execute("UPDATE torrents SET status='injecting', matched=matched+1, injected=injected+? WHERE info_hash=?",
+                              (1 if res == "tracker" else 0, ih))
+                    c.commit(); c.close()
+                    continue
                 if same:
                     dl_dir = t["downloadDir"]
                 else:
@@ -791,7 +869,7 @@ def run_match(tr, t, queries, manual=False):
                 try:
                     resp = tr.add(data, dl_dir); rr = resp.get("result"); args = resp.get("arguments", {})
                     # 注意：tr 对"新增"和"内容已存在"都返回 result=success，靠 arguments 里的键区分
-                    if "torrent-duplicate" in args: res = "duplicate"          # 该站种子已在做种，不算新注入
+                    if "torrent-duplicate" in args: res = "duplicate"
                     elif "torrent-added" in args or rr == "success": inj += 1; res = "injected"
                     else: res = "inject_fail:"+str(rr)
                 except Exception: res = "inject_err"
@@ -807,6 +885,10 @@ def run_match(tr, t, queries, manual=False):
         return m, inj
 
     matched = injected = 0; had_result = False; used = ""
+    if pre_results is not None:            # 下载时预存的同组候选，直接比对注入，不再搜索
+        m, inj = process(pre_results)
+        matched, injected, had_result, used = m, inj, True, "下载时预存"
+        queries = []
     for q in queries:
         try:
             results = prowlarr_search(q); had_result = True
@@ -964,7 +1046,7 @@ a{color:var(--acc)}
 <div class=stat><div class=n>{{DONE}}</div><div class=l>有匹配的种子</div></div>
 <div class=stat><div class=n class=mut>{{NOMATCH}}</div><div class=l>无匹配</div></div>
 </div>
-<div class=card><h2>辅种记录 <span class=mut style=font-weight:400>· 每 {{INTERVAL}}s 扫描 · 点种子名看来源和去向 · 辅不上可手动关键词重搜</span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>匹配</th><th class=r>注入</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
+<div class=card><h2>辅种记录 <span class=mut style=font-weight:400>· 每 {{INTERVAL}}s 扫描 · 点种子名看来源和去向 · 辅不上可手动关键词重搜</span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>在辅站数</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
 </div>
 <div id=tab-logs class=tab>
 <div class=card><h2>最近活动</h2><table><tr><th style=width:150px>时间</th><th>消息</th></tr>{{LOGS}}</table></div>
@@ -1057,7 +1139,7 @@ function mkTable(rs){
   var c2=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=x.site;c2.appendChild(sp);
   var c3=document.createElement('td');c3.className='r';c3.textContent=x.sizeh;
   var c4=document.createElement('td');c4.className='r';c4.textContent=x.seeders;
-  var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x.url,x.cat);};c5.appendChild(b);
+  var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x,rs);};c5.appendChild(b);
   tr.appendChild(c1);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tr.appendChild(c5);tbl.appendChild(tr);
  });
  return tbl;
@@ -1140,9 +1222,11 @@ function pollJob(id,box,t0){
   _sd=d;renderWall();
  }).catch(function(){setTimeout(function(){pollJob(id,box,t0);},2500);});
 }
-function dl(b,u,c){
+function dl(b,x,rs){
  b.disabled=true;b.textContent='下载中…';
- fetch('/api/dl?url='+encodeURIComponent(u)+(c?'&cat='+encodeURIComponent(c):'')).then(r=>r.json()).then(function(d){
+ var mates=(rs||[]).filter(o=>o.url!=x.url).map(o=>({url:o.url,size:o.size||0,site:o.site}));
+ fetch('/api/dl',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({url:x.url,cat:x.cat||'',mates:mates})}).then(r=>r.json()).then(function(d){
   if(d.ok){b.textContent='✅ 已下';b.style.background='var(--ok)';toast('已推送下载,点「⬇️ 下载」页看实时进度');}
   else{b.textContent='失败';b.disabled=false;toast('下载失败：'+(d.err||''));}
  }).catch(e=>{b.textContent='失败';b.disabled=false;toast('下载出错');});
@@ -1245,7 +1329,7 @@ def search_group(q, results, log=lambda m: None):
         url = r.get("downloadUrl") or r.get("guid") or ""
         if not url: continue
         out.append({"title": r.get("title",""), "site": r.get("indexer",""),
-                    "sizeh": human_size(r.get("size",0)), "seeders": r.get("seeders") or 0,
+                    "sizeh": human_size(r.get("size",0)), "size": r.get("size",0), "seeders": r.get("seeders") or 0,
                     "url": url, "cat": catlab(r), "info": r.get("infoUrl") or ""})
     out.sort(key=lambda x: x["seeders"], reverse=True)
     out = out[:100]
@@ -1389,6 +1473,18 @@ class Handler(BaseHTTPRequestHandler):
         s.end_headers()
         s.wfile.write("需要登录".encode())
         return False
+    def do_POST(s):
+        if not s._auth_ok():
+            return
+        if s.path.startswith("/api/dl"):
+            try:
+                ln = int(s.headers.get("Content-Length", "0"))
+                body = json.loads(s.rfile.read(ln) or b"{}")
+            except Exception:
+                body = {}
+            s._dl_run((body.get("url") or "").strip(), (body.get("cat") or "").strip(), body.get("mates") or [])
+            return
+        s.send_response(404); s.end_headers()
     def do_GET(s):
         if not s._auth_ok():
             return
@@ -1425,9 +1521,11 @@ class Handler(BaseHTTPRequestHandler):
             st = {"done":"done","no_match":"nomatch","searching":"searching","injecting":"searching"}.get(r[4],"err")
             label = {"done":"完成","no_match":"无匹配","searching":"搜索中","injecting":"辅种中"}.get(r[4], r[4])
             manual = f"<div class=rs><input placeholder='自定义关键词' value=''><button onclick=\"research('{esc(r[5])}',this)\">重搜</button></div>"
+            # 在辅站数=该内容实际在多少个站做种(注入/已存在/加tracker都算,不管是谁辅上的)
+            seeded = c.execute("SELECT COUNT(DISTINCT indexer) FROM matches WHERE info_hash=? AND result IN ('injected','duplicate','tracker')", (r[5],)).fetchone()[0]
             rows += (f"<tr><td class=name title='{esc(r[0])}'><a href='/torrent?hash={esc(r[5])}'>{esc(r[0])}</a></td>"
                      f"<td><span class=src>{esc(r[6] or '?')}</span></td><td class=mut>{esc(r[1])}</td>"
-                     f"<td class=r>{r[2]}</td><td class='r' style='color:var(--ok)'>{r[3]}</td>"
+                     f"<td class='r' style='color:var(--ok);font-weight:700'>{seeded}</td>"
                      f"<td><span class='b {st}'>{label}</span></td><td>{manual}</td></tr>")
         # 整理入库记录
         media_rows = ""
@@ -1452,7 +1550,7 @@ class Handler(BaseHTTPRequestHandler):
         html = (PAGE.replace("{{INTERVAL}}", str(CFG["SCAN_INTERVAL"]))
                     .replace("{{TOTAL}}", str(t_total)).replace("{{INJECT}}", str(t_inject))
                     .replace("{{DONE}}", str(t_done)).replace("{{NOMATCH}}", str(t_nomatch))
-                    .replace("{{ROWS}}", rows or "<tr><td colspan=7 class=mut>暂无记录，等待首次扫描…</td></tr>")
+                    .replace("{{ROWS}}", rows or "<tr><td colspan=6 class=mut>暂无记录，等待首次扫描…</td></tr>")
                     .replace("{{MEDIA}}", media_rows or "<tr><td colspan=5 class=mut>暂无入库记录</td></tr>")
                     .replace("{{LOGS}}", logs or "<tr><td colspan=2 class=mut>—</td></tr>"))
         b = html.encode("utf-8")
@@ -1468,10 +1566,10 @@ class Handler(BaseHTTPRequestHandler):
         ms = c.execute("SELECT indexer,matched_name,mode,result,MAX(ts) FROM matches WHERE info_hash=? GROUP BY indexer ORDER BY indexer", (h,)).fetchall()
         c.close()
         mrows = ""
-        rmap = {"injected":"✅ 已注入做种","duplicate":"⚠️ 已存在","matched":"匹配","inject_err":"注入出错"}
+        rmap = {"injected":"✅ 已注入做种","tracker":"✅ 已加Tracker做种(同hash)","duplicate":"⚠️ 已存在","matched":"匹配","inject_err":"注入出错"}
         for m in ms:
             rr = rmap.get(m[3], m[3]); col = "var(--ok)" if m[3]=="injected" else ("var(--warn)" if m[3]=="duplicate" else "var(--sub)")
-            mrows += f"<tr><td><span class=src>{esc(m[0])}</span></td><td class=mut>{'硬链接' if m[2]=='link' else '同名直注'}</td><td style='color:{col}'>{rr}</td></tr>"
+            mrows += f"<tr><td><span class=src>{esc(m[0])}</span></td><td class=mut>{'加Tracker' if m[2]=='tracker' else ('硬链接' if m[2]=='link' else '同名直注')}</td><td style='color:{col}'>{rr}</td></tr>"
         injected = t[7]
         page = (DETAIL.replace("{{NAME}}", esc(t[0])).replace("{{SRC}}", esc(t[1] or '?'))
                 .replace("{{SIZE}}", f"{t[2]/1024**3:.2f}").replace("{{FILES}}", str(t[3]))
@@ -1589,8 +1687,8 @@ class Handler(BaseHTTPRequestHandler):
     def _dl(s):
         from urllib.parse import urlparse, parse_qs
         qs_ = parse_qs(urlparse(s.path).query)
-        u = (qs_.get("url",[""])[0]).strip()
-        ucat = (qs_.get("cat",[""])[0]).strip()   # 搜索页已知的站点分类(music/book等)
+        s._dl_run((qs_.get("url",[""])[0]).strip(), (qs_.get("cat",[""])[0]).strip(), [])
+    def _dl_run(s, u, ucat, mates):
         if not u: s._send_json({"ok":False,"err":"缺少下载链接"}); return
         try:
             data = prowlarr_download(u)
@@ -1599,6 +1697,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception: cname = ""
             catmap = {"music":"音乐","anime":"动漫","tv":"电视剧","movie":"电影"}
             cat = catmap.get(ucat) or CFG["QB_CATEGORY"] or media_category(cname or "", None)
+            if cname and mates:   # 预存同组其他站的种子,下载完成后免搜索直接辅种
+                try:
+                    c = db(); c.execute("INSERT OR REPLACE INTO pending_seed(name,data,ts) VALUES(?,?,?)",
+                                        (cname, json.dumps(mates[:60], ensure_ascii=False), int(time.time())))
+                    c.commit(); c.close()
+                except Exception: pass
             res = QB().add(data, category=cat, tags="packseed")
             ok = "Ok" in res
             logmsg("INFO", f"搜索下载 → qb[{cat}]: {(cname or u)[:40]} [{res.strip()[:16] or 'ok'}]")
