@@ -1680,6 +1680,20 @@ width:26px;height:26px;font-size:13px;cursor:pointer;opacity:0;transition:.18s;l
 .dcard:hover .dcx{opacity:1}
 .dcx:hover{background:rgba(255,90,80,.95)}
 .dfree{position:absolute;top:7px;left:7px;background:rgba(255,212,0,.92);color:#00206e;border-radius:980px;padding:2px 8px;font-size:11px;font-weight:800}
+.voy{padding:0;overflow:hidden}
+.voysea{position:relative;height:132px;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(0,20,90,.30))}
+.voyw{position:absolute;left:0;bottom:0;width:200%;height:100%;fill:rgba(255,255,255,.16);animation:voyflow 9s linear infinite}
+.voyw2{fill:rgba(207,224,255,.20);animation-duration:6.5s;animation-direction:reverse;opacity:.9}
+.voyw3{fill:rgba(255,255,255,.30);animation-duration:4.5s}
+@keyframes voyflow{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.voyboat{position:absolute;bottom:44px;left:8px;font-size:27px;animation:voybob 2.6s ease-in-out infinite alternate;
+transition:left 1.1s cubic-bezier(.35,.7,.35,1);filter:drop-shadow(0 4px 10px rgba(0,10,60,.55));z-index:2}
+@keyframes voybob{from{transform:translateY(0) rotate(-7deg)}to{transform:translateY(-8px) rotate(7deg)}}
+.voyhome{position:absolute;right:14px;bottom:46px;font-size:30px;opacity:.85;animation:voybob 4.5s ease-in-out infinite alternate}
+.voytext{padding:14px 22px 18px;display:flex;justify-content:space-between;align-items:baseline;gap:14px;flex-wrap:wrap}
+.voystage{font-size:14px;font-weight:800;letter-spacing:.02em}
+.voynum{font-size:13px;color:var(--sub)}
+.voynum b{font-size:21px;color:var(--pop);font-weight:800;margin-right:3px}
 .mtile{background:linear-gradient(160deg,rgba(255,255,255,.30),rgba(255,255,255,.10))}
 .rph{width:108px;aspect-ratio:2/3;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:34px;color:rgba(255,255,255,.55);box-shadow:0 5px 16px rgba(0,10,60,.5)}
 .mgridwrap{overflow:visible;-webkit-mask-image:none;mask-image:none;padding:10px 0 20px}
@@ -2278,26 +2292,33 @@ function doSearch(){
  var q=document.getElementById('q').value.trim();if(!q)return;
  clearTimeout(_t);
  var box=document.getElementById('sresult');
- box.innerHTML='<div class=mut style="padding:10px 16px">正在提交搜索任务…</div>';
+ box.innerHTML=VOYAGE;
  fetch('/api/search2?q='+encodeURIComponent(q)).then(r=>r.json()).then(function(d){
   if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">提交失败：'+(d.err||'')+'</div>';return;}
   pollJob(d.id,box,Date.now());
  }).catch(e=>{box.innerHTML='<div class=mut style="padding:10px 16px">提交出错</div>';});
 }
+var VOYAGE=''
++'<div class="voy card"><div class=voysea>'
++'<svg class=voyw viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,70 C150,30 300,110 450,70 C600,30 750,110 900,70 C1050,30 1200,110 1350,70 L1350,120 L0,120 Z"/></svg>'
++'<svg class="voyw voyw2" viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,80 C150,50 300,110 450,80 C600,50 750,110 900,80 C1050,50 1200,110 1350,80 L1350,120 L0,120 Z"/></svg>'
++'<svg class="voyw voyw3" viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,90 C200,68 320,112 520,90 C700,70 820,112 1020,90 C1160,76 1240,104 1400,90 L1400,120 L0,120 Z"/></svg>'
++'<div class=voyboat>⛵</div><div class=voyhome>🏝</div></div>'
++'<div class=voytext><div class=voystage>启航</div><div class=voynum><b id=voyhits>0</b> 条线索已入网</div></div></div>';
 function pollJob(id,box,t0){
  fetch('/api/searchstat?id='+id).then(r=>r.json()).then(function(j){
   if(!j.ok){box.innerHTML='<div class=mut style="padding:10px 16px">'+(j.err||'任务丢失')+'</div>';return;}
   if(!j.done){
-   var el=Math.round((Date.now()-t0)/1000);
-   var wrap=document.createElement('div');wrap.style.cssText='padding:10px 16px;font-size:13px;line-height:1.8';
-   var tm=document.createElement('div');tm.style.cssText='color:var(--pop);font-weight:700;margin-bottom:4px';
-   tm.textContent='⏱ 搜索进行中 · 已用 '+el+' 秒';wrap.appendChild(tm);
-   (j.log||[]).forEach(function(m,i){
-    var ln=document.createElement('div');ln.style.color=(i==j.log.length-1)?'var(--fg)':'var(--sub)';
-    ln.textContent=m;wrap.appendChild(ln);
-   });
-   box.innerHTML='';box.appendChild(wrap);
-   setTimeout(function(){pollJob(id,box,t0);},1500);
+   var p=j.prog||{},tot=p.total||0,dn=p.done||0;
+   var pct=tot?Math.min(96,Math.round(dn/tot*100)):8;
+   if(!box.querySelector('.voy')){box.innerHTML=VOYAGE;}
+   var boat=box.querySelector('.voyboat');
+   if(boat)boat.style.left='calc('+pct+'% - 18px)';
+   var st=box.querySelector('.voystage');
+   if(st)st.textContent=(p.stage||'启航')+' · 已行 '+Math.round((Date.now()-t0)/1000)+' 秒'+(tot?' · 途经 '+dn+'/'+tot+' 港':'');
+   var hs=box.querySelector('#voyhits');
+   if(hs)hs.textContent=p.hits||0;
+   setTimeout(function(){pollJob(id,box,t0);},1200);
    return;
   }
   var d=j.result||{};
@@ -2527,11 +2548,21 @@ def prowlarr_search_fan(query, log=lambda m: None, per_timeout=25):
 _SJOBS = {}
 def _sjob_run(jid, q):
     job = _SJOBS[jid]
-    def log(m): job["log"].append(m)
+    job.setdefault("prog", {"done": 0, "total": 0, "hits": 0, "stage": "启航"})
+    def log(m):
+        job["log"].append(m)
+        # 顺带解析出结构化进度,前端只画浪不读日志
+        mm = re.search(r"进度 (\d+)/(\d+)", m)
+        if mm:
+            job["prog"]["done"] = int(mm.group(1)); job["prog"]["total"] = int(mm.group(2))
+            job["prog"]["stage"] = "巡海"
+        mh = re.search(r"返回 (\d+) 条", m)
+        if mh: job["prog"]["hits"] += int(mh.group(1))
     try:
         log(f"🚀 已提交「{q}」→ 分站并发搜索(单站超时25秒,慢站直接跳过)…")
         t0 = time.time()
         results = prowlarr_search_fan(q, log)
+        job["prog"]["stage"] = "归航"
         log(f"⏱ 搜索耗时 {int(time.time()-t0)} 秒。做种数过滤 + TMDB 识别配图…")
         job["result"] = search_group(q, results, log)
         log("✅ 完成")
@@ -3165,7 +3196,8 @@ class Handler(BaseHTTPRequestHandler):
         jid = (parse_qs(urlparse(s.path).query).get("id",[""])[0]).strip()
         j = _SJOBS.get(jid)
         if not j: s._send_json({"ok":False,"err":"任务不存在或已过期"}); return
-        s._send_json({"ok":True,"log":j["log"],"done":j["done"],"result":(j["result"] if j["done"] else None)})
+        s._send_json({"ok":True,"log":j["log"],"done":j["done"],"prog":j.get("prog") or {},
+                      "result":(j["result"] if j["done"] else None)})
     def _canceldl(s):
         from urllib.parse import urlparse, parse_qs
         h = (parse_qs(urlparse(s.path).query).get("hash",[""])[0]).strip()
