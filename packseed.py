@@ -1681,6 +1681,11 @@ width:26px;height:26px;font-size:13px;cursor:pointer;opacity:0;transition:.18s;l
 .dcx:hover{background:rgba(255,90,80,.95)}
 .dfree{position:absolute;top:7px;left:7px;background:rgba(255,212,0,.92);color:#00206e;border-radius:980px;padding:2px 8px;font-size:11px;font-weight:800}
 .mtile{background:linear-gradient(160deg,rgba(255,255,255,.30),rgba(255,255,255,.10))}
+.rph{width:108px;aspect-ratio:2/3;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:34px;color:rgba(255,255,255,.55);box-shadow:0 5px 16px rgba(0,10,60,.5)}
+.mgridwrap{overflow:visible;-webkit-mask-image:none;mask-image:none;padding:10px 0 20px}
+.mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(122px,1fr));gap:16px 14px;padding:0 20px}
+.mgrid .rcard{flex:none;width:auto}
+.mgrid .rcard img,.mgrid .rph{width:100%}
 .mbadge{position:absolute;left:8px;bottom:8px}
 .mbadge .b{backdrop-filter:blur(8px);box-shadow:0 4px 14px rgba(0,10,60,.4)}
 .dtt{font-size:13.5px;font-weight:700;letter-spacing:-.01em;margin-top:9px;line-height:1.35;
@@ -2092,9 +2097,10 @@ function dockify(el){
   for(var i=0;i<cards.length;i++){cards[i].style.transform='';cards[i].style.zIndex='';}
  });
 }
-(function(){
- var flow=document.querySelector('.rflow'),track=document.getElementById('rtrack');
- if(!flow||!track||track.children.length<2)return;
+function riverify(flow,speed){          // 让一条海报河流动起来(克隆无缝+悬停暂停+磁吸放大)
+ if(!flow)return;
+ var track=flow.firstElementChild;
+ if(!track||track.children.length<2)return;
  var setW=track.scrollWidth+14;                       // 一组的宽度(含尾部间隙)
  if(track.scrollWidth>flow.clientWidth*0.9){          // 够长才流动+克隆无缝
   [].slice.call(track.children).forEach(function(c){track.appendChild(c.cloneNode(true));});
@@ -2102,16 +2108,27 @@ function dockify(el){
   flow.addEventListener('mouseenter',function(){paused=true;});
   flow.addEventListener('mouseleave',function(){paused=false;});
   (function step(){
-   if(!paused){off+=0.4;if(off>=setW)off-=setW;track.style.transform='translateX('+(-off)+'px)';}
+   if(!paused){off+=(speed||0.4);if(off>=setW)off-=setW;track.style.transform='translateX('+(-off)+'px)';}
    requestAnimationFrame(step);
   })();
  }
  dockify(track);
-})();
+}
+riverify(document.querySelector('.rflow'),0.4);
+for(var mi=0;mi<6;mi++){riverify(document.getElementById('mflow'+mi),0.32);}  // 每个分类一条河
+function mToggle(i,btn){
+ var fl=document.getElementById('mflow'+i),gd=document.getElementById('mgrid'+i);
+ if(!fl||!gd)return;
+ if(!btn.dataset.o)btn.dataset.o=btn.textContent;
+ var open=gd.style.display!='none';
+ gd.style.display=open?'none':'block';
+ fl.style.display=open?'block':'none';
+ btn.textContent=open?btn.dataset.o:'收起';
+}
 (function(){
- var el=document.getElementById('rtrack');if(!el)return;
- el.addEventListener('click',function(e){
-  var c=e.target.closest('.rcard');if(!c||!c.dataset.tid||c.dataset.tid=='0')return;
+ document.addEventListener('click',function(e){       // 全局委托:首页河 + 各分类河/网格都能点
+  var c=e.target.closest?e.target.closest('.rcard'):null;
+  if(!c||!c.dataset.tid||c.dataset.tid=='0')return;
   var img=c.querySelector('img'),nm=c.querySelector('.rname'),yr=c.querySelector('.ryear');
   document.getElementById('im-img').src=img?img.src:'';
   document.getElementById('im-t').textContent=(nm?nm.textContent:'')+(yr&&yr.textContent?' ('+yr.textContent+')':'');
@@ -2980,29 +2997,28 @@ class Handler(BaseHTTPRequestHandler):
         smap = {"done":("已入库","done"),"hold":("待确认","nomatch"),"processing":("处理中","searching"),"error":("出错","err"),"skip":("跳过","nomatch")}
         CATS = [("电影","🎬"),("电视剧","📺"),("动漫","🎌"),("音乐","🎵"),("漫画/书","📖")]
         buckets = {c: [] for c, _ in CATS}; pend = []
-        for r in c.execute("SELECT info_hash,name,cat,tmdb_name,year,status,target,poster FROM media ORDER BY ts DESC LIMIT 300").fetchall():
-            ih,nm,cat,tn,yr,stt,tgt,pos = r
+        for r in c.execute("SELECT info_hash,name,cat,tmdb_name,year,status,target,poster,tmdbid,mtype FROM media ORDER BY ts DESC LIMIT 300").fetchall():
+            ih,nm,cat,tn,yr,stt,tgt,pos,tid,mty = r
             if stt in ("hold","error","processing"): pend.append(r); continue
             key = cat if cat in buckets else ("漫画/书" if cat in ("漫画","书籍","图书") else "电影")
             buckets[key].append(r)
         def mcard(r):
-            ih,nm,cat,tn,yr,stt,tgt,pos = r
+            """媒体海报卡:和「最近入库」同款(可流动/磁吸放大/点开简介)"""
+            ih,nm,cat,tn,yr,stt,tgt,pos,tid,mty = r
             title = tn or nm
             if pos:
-                thumb = f"<img class=dpos loading=lazy src='/api/poster?p={urllib.parse.quote(pos)}'>"
+                thumb = f"<img loading=lazy src='/api/poster?p={urllib.parse.quote(pos)}'>"
             else:
                 ico = {"音乐":"🎵","漫画/书":"📖"}.get(cat, "🎬")
-                thumb = f"<div class='dph mtile'>{ico}</div>"
-            lbl, cls = smap.get(stt, (stt, "err"))
-            return (f"<div class=dcard><div class=dwrap>{thumb}"
-                    f"<div class=mbadge><span class='b {cls}'>{esc(lbl)}</span></div></div>"
-                    f"<div class=dtt title='{esc(nm)}'>{esc(title)}</div>"
-                    f"<div class=dsub>{esc(yr or '')}{'  ·  ' + esc(cat) if cat else ''}</div></div>")
+                thumb = f"<div class='rph mtile'>{ico}</div>"
+            mt = mty or ("tv" if cat in ("电视剧", "动漫") else "movie")
+            return (f"<div class=rcard data-mt='{esc(mt)}' data-tid='{tid or 0}'><div class=rbob>{thumb}"
+                    f"<div class=rname>{esc(title)}</div><div class=ryear>{esc(yr or '')}</div></div></div>")
         media_rows = ""
         if pend:
             media_rows += "<div class=sgrp style='padding:0 20px'>⚠️ 待确认 / 处理中 <span class=mut style=font-weight:400>· 填 TMDB id 或片名一键入库</span></div><div class=dgrid>"
             for r in pend:
-                ih,nm,cat,tn,yr,stt,tgt,pos = r
+                ih,nm,cat,tn,yr,stt,tgt,pos,tid,mty = r
                 lbl, cls = smap.get(stt, (stt, "err"))
                 media_rows += (f"<div class=dcard><div class=dwrap><div class='dph mtile'>❓</div>"
                                f"<div class=mbadge><span class='b {cls}'>{esc(lbl)}</span></div></div>"
@@ -3010,13 +3026,19 @@ class Handler(BaseHTTPRequestHandler):
                                f"<div class=rs style='margin-top:6px'><input placeholder='TMDB id 或 片名' value=''>"
                                f"<button onclick=\"reid('{esc(ih)}',this)\">确认</button></div></div>")
             media_rows += "</div>"
-        for cname, icon in CATS:
+        for ci, (cname, icon) in enumerate(CATS):
             items = buckets.get(cname) or []
             if not items: continue
+            # 每类一条河:默认只放最新 20 个(流动展示),点「全部」摊开成网格
+            river = "".join(mcard(r) for r in items[:20])
+            grid = "".join(mcard(r) for r in items)
+            more = (f" <button class=dlbtn style='padding:3px 14px;font-size:12px;margin-left:6px' "
+                    f"onclick=\"mToggle({ci},this)\">全部 {len(items)} 项</button>") if len(items) > 5 else ""
             media_rows += (f"<div class=sgrp style='padding:0 20px'>{icon} {cname} "
-                           f"<span class=mut style=font-weight:400>· {len(items)} 项</span></div><div class=dgrid>")
-            media_rows += "".join(mcard(r) for r in items)
-            media_rows += "</div>"
+                           f"<span class=mut style=font-weight:400>· {len(items)} 项</span>{more}</div>"
+                           f"<div class=rflow id='mflow{ci}'><div class=rtrack>{river}</div></div>"
+                           f"<div class='rflow mgridwrap' id='mgrid{ci}' style='display:none'>"
+                           f"<div class=mgrid>{grid}</div></div>")
         recent = ""
         for r in c.execute("SELECT tmdb_name,year,poster,mtype,tmdbid FROM media WHERE status='done' AND poster IS NOT NULL AND poster != '' ORDER BY ts DESC LIMIT 14").fetchall():
             recent += (f"<div class=rcard data-mt='{esc(r[3] or 'tv')}' data-tid='{r[4] or 0}'><div class=rbob>"
