@@ -1680,6 +1680,9 @@ width:26px;height:26px;font-size:13px;cursor:pointer;opacity:0;transition:.18s;l
 .dcard:hover .dcx{opacity:1}
 .dcx:hover{background:rgba(255,90,80,.95)}
 .dfree{position:absolute;top:7px;left:7px;background:rgba(255,212,0,.92);color:#00206e;border-radius:980px;padding:2px 8px;font-size:11px;font-weight:800}
+.mtile{background:linear-gradient(160deg,rgba(255,255,255,.30),rgba(255,255,255,.10))}
+.mbadge{position:absolute;left:8px;bottom:8px}
+.mbadge .b{backdrop-filter:blur(8px);box-shadow:0 4px 14px rgba(0,10,60,.4)}
 .dtt{font-size:13.5px;font-weight:700;letter-spacing:-.01em;margin-top:9px;line-height:1.35;
 display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .dsub{font-size:11.5px;color:var(--sub);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1773,7 +1776,7 @@ select.ksin option{color:#00206e}
 <div id=im-ov onclick="this.classList.remove('show')"><div id=im-box onclick="event.stopPropagation()"><img id=im-img><div><div id=im-t></div><div id=im-p></div><a id=im-a target=_blank>在 Emby 中打开 →</a></div></div></div>
 </div>
 <div id=tab-media class=tab>
-<div class=card><h2>📥 整理入库 <span class=mut style=font-weight:400>· 下载完成自动识别→硬链接进 Emby 媒体库 · 待确认的可手动填 TMDB id/片名</span></h2><table><tr><th>下载名</th><th>分类</th><th>识别为</th><th>状态</th><th>目标/操作</th></tr>{{MEDIA}}</table></div>
+<div class=card><h2>📥 整理入库 <span class=mut style=font-weight:400>· 下载完成自动识别→硬链接进 Emby 媒体库 · 按分类陈列 · 待确认的可手动填 TMDB id/片名</span></h2>{{MEDIA}}</div>
 </div>
 <div id=tab-seed class=tab>
 <div class=stats>
@@ -2973,22 +2976,47 @@ class Handler(BaseHTTPRequestHandler):
                      f"<td><span class=src>{esc(r[6] or '?')}</span></td><td class=mut>{esc(r[1])}</td>"
                      f"<td class='r' style='color:var(--ok);font-weight:700'>{seeded}</td>"
                      f"<td><span class='b {st}'>{label}</span></td><td>{manual}</td></tr>")
-        # 整理入库记录
-        media_rows = ""
-        cmap = {"电影":"🎬","电视剧":"📺","动漫":"🎌"}
+        # 整理入库记录:按分类分组的海报墙
         smap = {"done":("已入库","done"),"hold":("待确认","nomatch"),"processing":("处理中","searching"),"error":("出错","err"),"skip":("跳过","nomatch")}
-        for r in c.execute("SELECT info_hash,name,cat,tmdb_name,year,status,target FROM media ORDER BY ts DESC LIMIT 60").fetchall():
-            ih,nm,cat,tn,yr,stt,tgt = r
-            lbl,cls = smap.get(stt,(stt,"err"))
-            if stt == "hold":
-                fix = f"<div class=rs><input placeholder='TMDB id 或 片名' value=''><button onclick=\"reid('{esc(ih)}',this)\">确认入库</button></div>"
-            elif stt == "done":
-                fix = f"<span class=mut title='{esc(tgt or '')}'>{esc((tgt or '').rsplit('/',1)[-1])}</span>"
-            else: fix = ""
-            media_rows += (f"<tr><td class=name title='{esc(nm)}'>{esc(nm)}</td>"
-                           f"<td>{cmap.get(cat,'')}{esc(cat or '')}</td>"
-                           f"<td>{esc((tn+' ('+(yr or '')+')') if tn else '—')}</td>"
-                           f"<td><span class='b {cls}'>{esc(lbl)}</span></td><td>{fix}</td></tr>")
+        CATS = [("电影","🎬"),("电视剧","📺"),("动漫","🎌"),("音乐","🎵"),("漫画/书","📖")]
+        buckets = {c: [] for c, _ in CATS}; pend = []
+        for r in c.execute("SELECT info_hash,name,cat,tmdb_name,year,status,target,poster FROM media ORDER BY ts DESC LIMIT 300").fetchall():
+            ih,nm,cat,tn,yr,stt,tgt,pos = r
+            if stt in ("hold","error","processing"): pend.append(r); continue
+            key = cat if cat in buckets else ("漫画/书" if cat in ("漫画","书籍","图书") else "电影")
+            buckets[key].append(r)
+        def mcard(r):
+            ih,nm,cat,tn,yr,stt,tgt,pos = r
+            title = tn or nm
+            if pos:
+                thumb = f"<img class=dpos loading=lazy src='/api/poster?p={urllib.parse.quote(pos)}'>"
+            else:
+                ico = {"音乐":"🎵","漫画/书":"📖"}.get(cat, "🎬")
+                thumb = f"<div class='dph mtile'>{ico}</div>"
+            lbl, cls = smap.get(stt, (stt, "err"))
+            return (f"<div class=dcard><div class=dwrap>{thumb}"
+                    f"<div class=mbadge><span class='b {cls}'>{esc(lbl)}</span></div></div>"
+                    f"<div class=dtt title='{esc(nm)}'>{esc(title)}</div>"
+                    f"<div class=dsub>{esc(yr or '')}{'  ·  ' + esc(cat) if cat else ''}</div></div>")
+        media_rows = ""
+        if pend:
+            media_rows += "<div class=sgrp style='padding:0 20px'>⚠️ 待确认 / 处理中 <span class=mut style=font-weight:400>· 填 TMDB id 或片名一键入库</span></div><div class=dgrid>"
+            for r in pend:
+                ih,nm,cat,tn,yr,stt,tgt,pos = r
+                lbl, cls = smap.get(stt, (stt, "err"))
+                media_rows += (f"<div class=dcard><div class=dwrap><div class='dph mtile'>❓</div>"
+                               f"<div class=mbadge><span class='b {cls}'>{esc(lbl)}</span></div></div>"
+                               f"<div class=dtt title='{esc(nm)}'>{esc(nm)}</div>"
+                               f"<div class=rs style='margin-top:6px'><input placeholder='TMDB id 或 片名' value=''>"
+                               f"<button onclick=\"reid('{esc(ih)}',this)\">确认</button></div></div>")
+            media_rows += "</div>"
+        for cname, icon in CATS:
+            items = buckets.get(cname) or []
+            if not items: continue
+            media_rows += (f"<div class=sgrp style='padding:0 20px'>{icon} {cname} "
+                           f"<span class=mut style=font-weight:400>· {len(items)} 项</span></div><div class=dgrid>")
+            media_rows += "".join(mcard(r) for r in items)
+            media_rows += "</div>"
         recent = ""
         for r in c.execute("SELECT tmdb_name,year,poster,mtype,tmdbid FROM media WHERE status='done' AND poster IS NOT NULL AND poster != '' ORDER BY ts DESC LIMIT 14").fetchall():
             recent += (f"<div class=rcard data-mt='{esc(r[3] or 'tv')}' data-tid='{r[4] or 0}'><div class=rbob>"
@@ -3002,7 +3030,7 @@ class Handler(BaseHTTPRequestHandler):
                     .replace("{{TOTAL}}", str(t_total)).replace("{{INJECT}}", str(t_inject))
                     .replace("{{DONE}}", str(t_done)).replace("{{NOMATCH}}", str(t_nomatch))
                     .replace("{{ROWS}}", rows or "<tr><td colspan=6 class=mut>暂无记录，等待首次扫描…</td></tr>")
-                    .replace("{{MEDIA}}", media_rows or "<tr><td colspan=5 class=mut>暂无入库记录</td></tr>")
+                    .replace("{{MEDIA}}", media_rows or "<div class=mut style='padding:4px 20px 16px'>暂无入库记录</div>")
                     .replace("{{RECENT}}", recent or "<div class=mut style='padding:4px 0 8px'>还没有带海报的入库记录,下一部片就有了</div>")
                     .replace("{{EMBYPUB}}", os.environ.get("EMBY_PUBLIC", "https://emby.leesy.cc"))
                     .replace("{{LOGOUT}}", ('<a href="/logout" class="tabbtn" style="float:right;color:rgba(255,255,255,.55)" '
