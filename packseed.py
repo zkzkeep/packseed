@@ -1867,11 +1867,22 @@ select.ksin option{color:#00206e}
 <div class=mut style="font-size:12px" id=xf-tip></div>
 <label class=xfl>主标题</label><textarea id=xf-t class=xfta rows=2></textarea>
 <label class=xfl>副标题</label><textarea id=xf-s class=xfta rows=1></textarea>
-<label class=xfl>简介(bbcode)</label><textarea id=xf-d class=xfta rows=8></textarea>
-<div style="margin-top:10px;display:flex;gap:10px">
+<label class=xfl>简介(bbcode)</label><textarea id=xf-d class=xfta rows=7></textarea>
+<div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+<button class=dlbtn style="background:var(--pop);color:#00206e" onclick="xfShot(this)">🎬 生成 MediaInfo + 截图</button>
+<span class=mut id=xf-shotmsg style="font-size:12px"></span>
+</div>
+<div id=xf-shotout style="display:none">
+<label class=xfl>MediaInfo</label><textarea id=xf-mi class=xfta rows=8 style="font-size:11.5px"></textarea>
+<label class=xfl>截图(bbcode,已传 pixhost)</label><textarea id=xf-sh class=xfta rows=3></textarea>
+<div id=xf-shthumbs style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
+</div>
+<div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
 <button class=dlbtn onclick="xfCopy('xf-t',this)">复制主标题</button>
 <button class=dlbtn onclick="xfCopy('xf-s',this)">复制副标题</button>
 <button class=dlbtn onclick="xfCopy('xf-d',this)">复制简介</button>
+<button class=dlbtn onclick="xfCopy('xf-mi',this)">复制MediaInfo</button>
+<button class=dlbtn onclick="xfCopy('xf-sh',this)">复制截图</button>
 </div></div></div>
 </div>
 <div id=tab-logs class=tab>
@@ -2087,7 +2098,9 @@ function gapLoad(btn){
   el.innerHTML=h+'</table>';
  }).catch(function(){if(btn){btn.disabled=false;btn.textContent='刷新';}});
 }
+var _xfHash='';
 function xfer(h){
+ _xfHash=h;
  fetch('/api/xfer?hash='+h).then(r=>r.json()).then(function(d){
   if(!d.ok){toast(d.banned?('🚫 '+d.err):('失败: '+(d.err||'')));return;}
   document.getElementById('xf-meta').textContent=' · '+d.sizeh+' · '+d.files+' 个文件';
@@ -2095,13 +2108,47 @@ function xfer(h){
   document.getElementById('xf-t').value=d.title;
   document.getElementById('xf-s').value=d.sub;
   document.getElementById('xf-d').value=d.desc;
+  document.getElementById('xf-shotout').style.display='none';
+  document.getElementById('xf-shotmsg').textContent='';
+  document.getElementById('xf-mi').value='';document.getElementById('xf-sh').value='';
+  document.getElementById('xf-shthumbs').innerHTML='';
   document.getElementById('xf-ov').classList.add('show');
  });
 }
+function xfShot(btn){
+ if(!_xfHash)return;
+ btn.disabled=true;
+ var msg=document.getElementById('xf-shotmsg');
+ msg.textContent='🎬 正在抽帧+读取媒体信息+上传图床,约十几秒…';
+ fetch('/api/xfershot?hash='+_xfHash+'&go=1').then(r=>r.json()).then(function(){
+  (function poll(){
+   fetch('/api/xfershot?hash='+_xfHash).then(r=>r.json()).then(function(d){
+    if(!d.done){setTimeout(poll,2000);return;}
+    btn.disabled=false;
+    if(d.err){msg.textContent='❌ '+d.err;return;}
+    document.getElementById('xf-shotout').style.display='block';
+    var NL=String.fromCharCode(10);
+    document.getElementById('xf-mi').value=d.mediainfo||'';
+    var bb=(d.shots||[]).map(function(s){return '[img]'+s[1]+'[/img]';}).join(' ');
+    document.getElementById('xf-sh').value=bb;
+    var tb=document.getElementById('xf-shthumbs');tb.innerHTML='';
+    (d.shots||[]).forEach(function(s){var a=document.createElement('a');a.href=s[0];a.target='_blank';
+     var im=document.createElement('img');im.src=s[1];im.style.cssText='height:64px;border-radius:6px';a.appendChild(im);tb.appendChild(a);});
+    // MediaInfo + 截图 自动追加到简介末尾(先去掉上一次追加的,避免重复)
+    var dsc=document.getElementById('xf-d');
+    var cut=dsc.value.indexOf('[quote]');
+    var head=(cut>=0?dsc.value.slice(0,cut):dsc.value).trim();
+    dsc.value=head+NL+NL+'[quote]'+(d.mediainfo||'')+'[/quote]'+NL+bb;
+    msg.textContent='✅ 已生成 '+(d.shots||[]).length+' 张截图,并追加进简介';
+   }).catch(function(){btn.disabled=false;msg.textContent='❌ 轮询出错';});
+  })();
+ }).catch(function(){btn.disabled=false;msg.textContent='❌ 启动失败';});
+}
+var _XFLBL={'xf-t':'复制主标题','xf-s':'复制副标题','xf-d':'复制简介','xf-mi':'复制MediaInfo','xf-sh':'复制截图'};
 function xfCopy(id,btn){
  var ta=document.getElementById(id);ta.select();
  try{navigator.clipboard.writeText(ta.value);}catch(e){document.execCommand('copy');}
- btn.textContent='✅ 已复制';setTimeout(function(){btn.textContent=btn.textContent.replace('✅ 已复制',id=='xf-t'?'复制主标题':id=='xf-s'?'复制副标题':'复制简介');},1200);
+ btn.textContent='✅ 已复制';setTimeout(function(){btn.textContent=_XFLBL[id]||'复制';},1200);
 }
 showTab((location.hash||'#search').slice(1));
 window.addEventListener('hashchange',function(){showTab(location.hash.slice(1)||'search');});
@@ -2870,6 +2917,149 @@ def gap_report():
     rows.sort(key=lambda x: len(x["missing"]))
     return {"ok": True, "sites": len(all_sites), "rows": rows}
 
+# ---- MediaInfo(ffprobe) + 截图(ffmpeg)+ pixhost 免费图床 ----
+def _ff(name):
+    """定位 ffprobe/ffmpeg:优先 /config/bin 的静态二进制,回退 PATH"""
+    import shutil as _sh
+    local = os.path.join(os.path.dirname(CFG["DB"]), "bin", name)
+    if os.path.exists(local) and os.access(local, os.X_OK): return local
+    return _sh.which(name)
+
+_VIDEXT = (".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".wmv", ".mov", ".flv", ".webm", ".iso")
+def _biggest_video(ih):
+    """种子里最大的视频文件绝对路径(容器内)。辅种副本也能定位到同一份数据。"""
+    try:
+        for src in (TR().torrents(), QB().torrents()):
+            for t in src:
+                h = t.get("hashString") or t.get("hash") or ""
+                if h.lower() != ih.lower(): continue
+                base = t.get("downloadDir") or t.get("save_path") or ""
+                files = t.get("files") or []
+                cand = []
+                for f in files:
+                    nm = f.get("name") or ""
+                    sz = f.get("length") or f.get("size") or 0
+                    if nm.lower().endswith(_VIDEXT): cand.append((sz, os.path.join(base, nm)))
+                if not cand and files:   # qb 的 files 需另取;这里兜底用 content_path
+                    p = t.get("content_path") or (os.path.join(base, t.get("name", "")))
+                    return p
+                if cand:
+                    cand.sort(reverse=True); return cand[0][1]
+    except Exception: pass
+    return ""
+
+def gen_mediainfo(path):
+    """ffprobe → 发种用的 MediaInfo 文本"""
+    fp = _ff("ffprobe")
+    if not fp: raise RuntimeError("容器内没有 ffprobe")
+    import subprocess
+    out = subprocess.run([fp, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path],
+                         capture_output=True, timeout=60).stdout
+    d = json.loads(out or b"{}")
+    fmt = d.get("format", {}); streams = d.get("streams", [])
+    L = ["General"]
+    L.append(f"Complete name  : {os.path.basename(path)}")
+    L.append(f"Format         : {fmt.get('format_name','?')}")
+    dur = float(fmt.get("duration", 0) or 0)
+    if dur: L.append(f"Duration       : {int(dur//3600)}h {int(dur%3600//60)}min {int(dur%60)}s")
+    if fmt.get("size"): L.append(f"File size      : {human_size(int(fmt['size']))}")
+    if fmt.get("bit_rate"): L.append(f"Overall bitrate: {int(int(fmt['bit_rate'])/1000)} kb/s")
+    vi = ai = ti = 0
+    _LANG = {"chi":"Chinese","zho":"Chinese","eng":"English","jpn":"Japanese","kor":"Korean","und":""}
+    for s in streams:
+        ct = s.get("codec_type")
+        if ct == "video":
+            vi += 1; L.append(f"\nVideo #{vi}")
+            L.append(f"Format         : {s.get('codec_name','?').upper()} {s.get('profile','')}".rstrip())
+            L.append(f"Resolution     : {s.get('width','?')}x{s.get('height','?')}")
+            fr = s.get("r_frame_rate", "0/1")
+            try:
+                a, b = fr.split("/"); fps = float(a)/float(b) if float(b) else 0
+                if fps: L.append(f"Frame rate     : {fps:.3f} fps")
+            except Exception: pass
+            if s.get("bit_rate"): L.append(f"Bit rate       : {int(int(s['bit_rate'])/1000)} kb/s")
+            if s.get("pix_fmt"): L.append(f"Color          : {s['pix_fmt']}")
+        elif ct == "audio":
+            ai += 1; L.append(f"\nAudio #{ai}")
+            L.append(f"Format         : {s.get('codec_name','?').upper()}")
+            if s.get("channels"): L.append(f"Channels       : {s['channels']}ch")
+            if s.get("sample_rate"): L.append(f"Sampling rate  : {int(s['sample_rate'])/1000:.1f} kHz")
+            lg = (s.get("tags") or {}).get("language", "")
+            if lg: L.append(f"Language       : {_LANG.get(lg, lg)}")
+        elif ct == "subtitle":
+            ti += 1
+            lg = (s.get("tags") or {}).get("language", "")
+            L.append(f"\nText #{ti}       : {s.get('codec_name','?')} {(_LANG.get(lg,lg))}".rstrip())
+    return "\n".join(L)
+
+def pixhost_upload(jpg_bytes, fname="shot.jpg"):
+    """上传一张图到 pixhost(免费,无需账号)。返回 (show_url, th_url, full_url)"""
+    b = "----px" + str(int(time.time()*1000)); parts = []
+    def field(n, v): parts.append(("--"+b+f"\r\nContent-Disposition: form-data; name=\"{n}\"\r\n\r\n{v}\r\n").encode())
+    field("content_type", "0")
+    parts.append(("--"+b+f"\r\nContent-Disposition: form-data; name=\"img\"; filename=\"{fname}\"\r\n"
+                  "Content-Type: image/jpeg\r\n\r\n").encode())
+    parts.append(jpg_bytes); parts.append(b"\r\n"); parts.append(("--"+b+"--\r\n").encode())
+    req = urllib.request.Request("https://api.pixhost.to/images", data=b"".join(parts),
+          headers={"Content-Type": "multipart/form-data; boundary="+b, "Accept": "application/json"})
+    # pixhost 是境外服务,容器 DNS 常解析不了,和 TMDB 一样走代理(代理端解析域名)
+    opener = (urllib.request.build_opener(urllib.request.ProxyHandler(
+              {"http": CFG["TMDB_PROXY"], "https": CFG["TMDB_PROXY"]}))
+              if CFG["TMDB_PROXY"] else urllib.request.build_opener())
+    d = json.load(opener.open(req, timeout=40))
+    th = d.get("th_url", ""); show = d.get("show_url", "")
+    full = th.replace("//t", "//img", 1).replace("/thumbs/", "/images/") if th else ""
+    return show, th, full
+
+SHOTS_DIR = os.path.join(os.path.dirname(CFG["DB"]), "shots")
+def gen_shots(path, ih, n=4):
+    """ffmpeg 均匀抽 n 帧 → 存本地 → 自托管公网直链(seed.leesy.cc/api/shot)。不依赖墙外图床。"""
+    fm = _ff("ffmpeg"); fp = _ff("ffprobe")
+    if not fm: raise RuntimeError("容器内没有 ffmpeg")
+    import subprocess
+    os.makedirs(SHOTS_DIR, exist_ok=True)
+    dur = 0
+    if fp:
+        try:
+            o = subprocess.run([fp, "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                               capture_output=True, timeout=30).stdout
+            dur = float((o or b"0").strip() or 0)
+        except Exception: pass
+    if dur <= 0: dur = 3600
+    base = (CFG["PUBLIC_URL"] or "").rstrip("/")
+    shots = []
+    for i in range(n):
+        ts = dur * (i + 1) / (n + 1)                    # 避开片头片尾,均匀取
+        fn = f"{ih[:16]}_{i}.jpg"
+        jpg = os.path.join(SHOTS_DIR, fn)
+        try:
+            subprocess.run([fm, "-y", "-ss", str(int(ts)), "-i", path, "-vframes", "1",
+                            "-vf", "scale=1280:-2", "-q:v", "3", jpg], capture_output=True, timeout=60)
+            if os.path.exists(jpg) and os.path.getsize(jpg) > 0:
+                url = (base + "/api/shot?f=" + fn) if base else ("/api/shot?f=" + fn)
+                shots.append((url, url))                 # (点开大图, 缩略) —— 自托管同一张
+        except Exception as e:
+            logmsg("WARN", f"截图{i}失败: {str(e)[:40]}")
+    return shots
+
+_XSHOT = {}   # ih -> {done,err,mediainfo,shots,ts}
+def _xshot_run(ih):
+    _XSHOT[ih] = {"done": False, "err": "", "mediainfo": "", "shots": [], "ts": time.time()}
+    try:
+        path = _biggest_video(ih)
+        if not path: raise RuntimeError("找不到视频文件(种子可能不在tr/qb里)")
+        if not os.path.exists(path): raise RuntimeError(f"文件不存在: {path[:60]}")
+        try: _XSHOT[ih]["mediainfo"] = gen_mediainfo(path)
+        except Exception as e: _XSHOT[ih]["mediainfo"] = f"(MediaInfo 生成失败: {str(e)[:50]})"
+        _XSHOT[ih]["shots"] = gen_shots(path, ih)
+        if not (CFG["PUBLIC_URL"] or "").strip():
+            _XSHOT[ih]["err"] = "截图已生成,但没设 PUBLIC_URL,PT 站看不到图。去设置填『本面板公网地址』"
+        _XSHOT[ih]["done"] = True
+        logmsg("INFO", f"发种资料: MediaInfo+{len(_XSHOT[ih]['shots'])}张截图 已就绪 {os.path.basename(path)[:36]}")
+    except Exception as e:
+        _XSHOT[ih].update(done=True, err=str(e)[:80])
+        logmsg("WARN", f"发种资料生成失败: {str(e)[:60]}")
+
 def xfer_pack(ih):
     """半自动发种资料包:标题/副标题/TMDB简介bbcode。禁转标记硬拦截。"""
     c = db()
@@ -3050,6 +3240,8 @@ class Handler(BaseHTTPRequestHandler):
             s._wecom_get(); return
         if s.path.startswith("/api/poster"):
             s._poster(); return          # 公开海报,免登录(图文通知的图要外网可达)
+        if s.path.startswith("/api/shot"):
+            s._shot(); return            # 发种截图,免登录(PT站要外网可达)
         if s.path.startswith("/api/bgv"):
             s._bgv(); return             # 海浪视频背景,免登录
         if s.path.startswith("/api/bg"):
@@ -3098,6 +3290,17 @@ class Handler(BaseHTTPRequestHandler):
             s._ks(); return
         if s.path.startswith("/api/gap"):
             s._send_json(gap_report()); return
+        if s.path.startswith("/api/xfershot"):
+            from urllib.parse import urlparse, parse_qs
+            q_ = parse_qs(urlparse(s.path).query)
+            ih = (q_.get("hash", [""])[0]).strip()
+            st = _XSHOT.get(ih)
+            if q_.get("go") == ["1"] and (not st or st.get("done")):
+                threading.Thread(target=_xshot_run, args=(ih,), daemon=True).start()
+                s._send_json({"ok": True, "started": True}); return
+            if not st: s._send_json({"ok": True, "started": False, "done": False}); return
+            s._send_json({"ok": True, "done": st["done"], "err": st["err"],
+                          "mediainfo": st["mediainfo"], "shots": st["shots"]}); return
         if s.path.startswith("/api/xfer"):
             from urllib.parse import urlparse, parse_qs
             q_ = parse_qs(urlparse(s.path).query)
@@ -3500,6 +3703,18 @@ class Handler(BaseHTTPRequestHandler):
                 open(cache, "wb").write(data)
             except Exception:
                 s.send_response(404); s.end_headers(); return
+        s.send_response(200); s.send_header("Content-Type","image/jpeg")
+        s.send_header("Cache-Control","max-age=604800"); s.send_header("Content-Length",str(len(data)))
+        s.end_headers(); s.wfile.write(data)
+    def _shot(s):
+        from urllib.parse import urlparse, parse_qs
+        f = (parse_qs(urlparse(s.path).query).get("f",[""])[0]).strip()
+        if not re.match(r'^[A-Za-z0-9._-]+\.jpg$', f):    # 只允许 basename,防目录穿越
+            s.send_response(404); s.end_headers(); return
+        fp = os.path.join(SHOTS_DIR, f)
+        if not os.path.exists(fp):
+            s.send_response(404); s.end_headers(); return
+        data = open(fp, "rb").read()
         s.send_response(200); s.send_header("Content-Type","image/jpeg")
         s.send_header("Cache-Control","max-age=604800"); s.send_header("Content-Length",str(len(data)))
         s.end_headers(); s.wfile.write(data)
