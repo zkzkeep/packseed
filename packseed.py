@@ -1686,10 +1686,12 @@ width:26px;height:26px;font-size:13px;cursor:pointer;opacity:0;transition:.18s;l
 .voyw2{fill:rgba(207,224,255,.20);animation-duration:6.5s;animation-direction:reverse;opacity:.9}
 .voyw3{fill:rgba(255,255,255,.30);animation-duration:4.5s}
 @keyframes voyflow{from{transform:translateX(0)}to{transform:translateX(-50%)}}
-.voyboat{position:absolute;bottom:44px;left:8px;font-size:27px;animation:voybob 2.6s ease-in-out infinite alternate;
-transition:left 1.1s cubic-bezier(.35,.7,.35,1);filter:drop-shadow(0 4px 10px rgba(0,10,60,.55));z-index:2}
+.voyboat{position:absolute;bottom:40px;left:8px;line-height:0;animation:voybob 2.6s ease-in-out infinite alternate;
+transition:left 1.1s cubic-bezier(.35,.7,.35,1);filter:drop-shadow(0 5px 12px rgba(0,10,60,.6));z-index:2}
 @keyframes voybob{from{transform:translateY(0) rotate(-7deg)}to{transform:translateY(-8px) rotate(7deg)}}
-.voyhome{position:absolute;right:14px;bottom:46px;font-size:30px;opacity:.85;animation:voybob 4.5s ease-in-out infinite alternate}
+.voyhome{position:absolute;right:18px;bottom:42px;line-height:0;filter:drop-shadow(0 5px 14px rgba(0,10,60,.5))}
+.voylamp{animation:voyglow 2.8s ease-in-out infinite alternate;transform-origin:22px 16px}
+@keyframes voyglow{from{opacity:.14;transform:scale(.8)}to{opacity:.5;transform:scale(1.5)}}
 .voytext{padding:14px 22px 18px;display:flex;justify-content:space-between;align-items:baseline;gap:14px;flex-wrap:wrap}
 .voystage{font-size:14px;font-weight:800;letter-spacing:.02em}
 .voynum{font-size:13px;color:var(--sub)}
@@ -2303,7 +2305,18 @@ var VOYAGE=''
 +'<svg class=voyw viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,70 C150,30 300,110 450,70 C600,30 750,110 900,70 C1050,30 1200,110 1350,70 L1350,120 L0,120 Z"/></svg>'
 +'<svg class="voyw voyw2" viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,80 C150,50 300,110 450,80 C600,50 750,110 900,80 C1050,50 1200,110 1350,80 L1350,120 L0,120 Z"/></svg>'
 +'<svg class="voyw voyw3" viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,90 C200,68 320,112 520,90 C700,70 820,112 1020,90 C1160,76 1240,104 1400,90 L1400,120 L0,120 Z"/></svg>'
-+'<div class=voyboat>⛵</div><div class=voyhome>🏝</div></div>'
++'<div class=voyboat><svg viewBox="0 0 40 44" width="34" height="37">'
++'<path d="M20 2 L20 30 L6 30 Z" fill="#ffffff" opacity=".97"/>'
++'<path d="M23 9 L23 30 L34 30 Z" fill="#CFE0FF" opacity=".92"/>'
++'<rect x="19.2" y="1" width="1.8" height="30" rx=".9" fill="#ffffff"/>'
++'<path d="M2 32 L38 32 L32 40 L8 40 Z" fill="#FFD400"/></svg></div>'
++'<div class=voyhome><svg viewBox="0 0 44 52" width="38" height="45">'
++'<path d="M14 20 L30 20 L33 46 L11 46 Z" fill="#ffffff" opacity=".95"/>'
++'<path d="M15.2 27 L28.8 27 L29.4 33 L14.6 33 Z" fill="#CFE0FF" opacity=".95"/>'
++'<rect x="15" y="12" width="14" height="8" rx="2" fill="#FFD400"/>'
++'<path d="M13 12 L31 12 L27 5 L17 5 Z" fill="#ffffff" opacity=".95"/>'
++'<circle class=voylamp cx="22" cy="16" r="9" fill="#FFD400" opacity=".28"/>'
++'<rect x="7" y="46" width="30" height="4" rx="2" fill="#ffffff" opacity=".6"/></svg></div></div>'
 +'<div class=voytext><div class=voystage>启航</div><div class=voynum><b id=voyhits>0</b> 条线索已入网</div></div></div>';
 function pollJob(id,box,t0){
  fetch('/api/searchstat?id='+id).then(r=>r.json()).then(function(j){
