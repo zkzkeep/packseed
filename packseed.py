@@ -1690,8 +1690,12 @@ width:26px;height:26px;font-size:13px;cursor:pointer;opacity:0;transition:.18s;l
 transition:left 2.4s cubic-bezier(.4,.15,.35,1);filter:drop-shadow(0 6px 14px rgba(0,10,60,.55));z-index:3}
 @keyframes voybob{from{transform:translateY(2px) rotate(-6deg)}to{transform:translateY(-7px) rotate(6deg)}}
 .voyhome{position:absolute;right:20px;bottom:54px;line-height:0;z-index:2;filter:drop-shadow(0 6px 16px rgba(0,10,60,.45))}
-.voylamp{animation:voyglow 2.8s ease-in-out infinite alternate;transform-origin:22px 16px}
+.voylamp{animation:voyglow 2.8s ease-in-out infinite alternate;transform-origin:23px 15px}
 @keyframes voyglow{from{opacity:.14;transform:scale(.8)}to{opacity:.5;transform:scale(1.5)}}
+.voydock .voylamp{animation-duration:1.1s}                       /* 靠岸:灯塔加急闪,像在指挥卸货 */
+.voydock .voyboat{animation-duration:5s}                          /* 港内风平浪静,船不再大幅摇 */
+@keyframes voybobcalm{from{transform:translateY(1px) rotate(-2deg)}to{transform:translateY(-3px) rotate(2deg)}}
+.voydock .voyboat{animation-name:voybobcalm}
 .voytext{padding:14px 22px 18px;display:flex;justify-content:space-between;align-items:baseline;gap:14px;flex-wrap:wrap}
 .voystage{font-size:14px;font-weight:800;letter-spacing:.02em}
 .voynum{font-size:13px;color:var(--sub)}
@@ -2333,20 +2337,15 @@ function pollJob(id,box,t0){
   if(!j.ok){box.innerHTML='<div class=mut style="padding:10px 16px">'+(j.err||'任务丢失')+'</div>';return;}
   if(!j.done){
    var p=j.prog||{},tot=p.total||0,dn=p.done||0;
-   // 航程分两段:巡海(各站回话)只占前55%,归航(识别配图)渐近逼近但绝不提前靠岸
-   var pct;
-   if(p.stage=='归航'){
-    if(!_voyT)_voyT=Date.now();
-    var el2=(Date.now()-_voyT)/1000;
-    pct=55+36*(1-Math.exp(-el2/9));          // 越近岸越慢,像真的在减速入港
-   }else{
-    pct=6+(tot?dn/tot:0)*49;
-   }
-   if(!box.querySelector('.voy')){box.innerHTML=VOYAGE;_voyT=0;}
+   // 船位老实跟着港口数走:走了多少港,就在海图上的多少处。全部走完=靠岸卸货(识别配图)
+   var docked=(p.stage=='归航')||(tot&&dn>=tot);
+   var pct=docked?93:(6+(tot?dn/tot:0)*87);
+   if(!box.querySelector('.voy')){box.innerHTML=VOYAGE;}
    var boat=box.querySelector('.voyboat');
    if(boat)boat.style.left='calc('+pct.toFixed(1)+'% - 19px)';
+   if(docked)box.querySelector('.voysea').classList.add('voydock');
    var st=box.querySelector('.voystage');
-   var stx=(p.stage=='归航')?'归航 · 正在辨认海图':((p.stage||'启航')+(tot?' · 途经 '+dn+'/'+tot+' 港':''));
+   var stx=docked?('已靠岸 · 清点渔获'+(tot?'(走遍 '+tot+' 港)':'')):((p.stage||'启航')+(tot?' · 途经 '+dn+'/'+tot+' 港':''));
    if(st)st.textContent=stx+' · 已行 '+Math.round((Date.now()-t0)/1000)+' 秒';
    var hs=box.querySelector('#voyhits');
    if(hs)hs.textContent=p.hits||0;
