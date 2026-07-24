@@ -2879,11 +2879,26 @@ def xfer_pack(ih):
     # 禁转检测:本种名字 + 各站搜到的同内容标题,一个带标记就全线拦截
     titles = [name] + [x[0] or "" for x in c.execute("SELECT matched_name FROM matches WHERE info_hash=?", (ih,)).fetchall()]
     hit = next((tt for tt in titles if noxfer(tt)), None)
+    # 一级:精确 name/info_hash 命中入库记录
     m = c.execute("SELECT tmdbid,tmdb_name,year,mtype,poster FROM media WHERE tmdb_name!='' AND status='done' AND (name=? OR info_hash=?) LIMIT 1", (name, ih)).fetchone()
+    # 二级:库里按识别出的中文名模糊配(辅种副本名字/hash都和入库那条不同,精确必落空)
+    if not (m and m[0]):
+        q = extract_query(name)
+        if q:
+            m = c.execute("SELECT tmdbid,tmdb_name,year,mtype,poster FROM media WHERE tmdb_name!='' AND status='done' "
+                          "AND (tmdb_name LIKE ? OR ? LIKE '%'||tmdb_name||'%') ORDER BY LENGTH(tmdb_name) DESC LIMIT 1",
+                          (f"%{q}%", q)).fetchone()
     c.close()
     if hit:
         return {"ok": False, "banned": True, "err": f"检测到禁转/独家标记,坚决不转: {hit[:80]}"}
     sub, desc = "", ""
+    # 三级:库里也没有(纯保种的种)→ 从种子名直接问 TMDB 现查
+    if not (m and m[0]):
+        try:
+            mm = tmdb_match(extract_query(name) or name)
+            if mm and mm.get("conf") != "low":
+                m = (mm["id"], mm["tmdb_name"], mm.get("year") or "", mm["mtype"], mm.get("poster") or "")
+        except Exception: pass
     if m and m[0]:
         tid, tname, yr, mtype, poster = m
         sub = f"{tname} ({yr})" if yr else tname
@@ -2897,6 +2912,9 @@ def xfer_pack(ih):
             desc = "\n".join(l for l in lines if l is not None)
         except Exception:
             desc = f"◎片名  {sub}\n◎TMDB  https://www.themoviedb.org/{mtype or 'tv'}/{tid}"
+    if not sub:                    # TMDB 也认不出(冷门/写真/纪录)——给个可编辑的兜底,别留空让人以为坏了
+        sub = extract_query(name) or name
+        desc = desc or f"◎片名  {sub}\n◎大小  {human_size(size)} · {nfiles} 个文件\n\n(未匹配到 TMDB,简介请自行补充)"
     return {"ok": True, "title": name, "sub": sub, "desc": desc,
             "sizeh": human_size(size), "files": nfiles,
             "tip": "上传时直接用原站 .torrent(NexusPHP 会自动换 passkey 重签);目标站若强制 source 标记需重制种子。发布前请再核对目标站发种规则。"}
