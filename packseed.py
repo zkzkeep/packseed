@@ -77,7 +77,9 @@ def _coerce(k, v):
 def load_settings():
     try:
         if os.path.exists(SETTINGS_FILE):
-            for k, v in json.load(open(SETTINGS_FILE, encoding="utf-8")).items():
+            with open(SETTINGS_FILE, encoding="utf-8") as _f:
+                saved = json.load(_f)
+            for k, v in saved.items():
                 if k in CFG and k in SETTABLE:
                     CFG[k] = _coerce(k, v)
     except Exception as e:
@@ -87,14 +89,16 @@ def save_settings(d):
     cur = {}
     try:
         if os.path.exists(SETTINGS_FILE):
-            cur = json.load(open(SETTINGS_FILE, encoding="utf-8"))
+            with open(SETTINGS_FILE, encoding="utf-8") as _f:
+                cur = json.load(_f)
     except Exception: pass
     for k, v in d.items():
         if k in SETTABLE and k in CFG:
             CFG[k] = _coerce(k, v)
             cur[k] = CFG[k]
     tmp = SETTINGS_FILE + ".tmp"
-    json.dump(cur, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    with open(tmp, "w", encoding="utf-8") as _f:
+        json.dump(cur, _f, ensure_ascii=False, indent=1)
     os.replace(tmp, SETTINGS_FILE)
     try: os.chmod(SETTINGS_FILE, 0o600)   # 里面有密钥,只许属主读写
     except Exception: pass
@@ -209,6 +213,9 @@ def init_db():
 _WECOM = {"tok": "", "exp": 0}
 _NQUEUE = []   # 未送达通知队列,后台线程重投
 def _wecom_opener():
+    # 注意:这里刻意复用 TMDB_PROXY(通常就是本机 mihomo/clash)。企微要求「可信IP」白名单,
+    # 家宽是动态公网IP会被拒;mihomo 里加规则 DOMAIN-SUFFIX,qyapi.weixin.qq.com,PROXY 把企微流量
+    # 路由到固定IP的机场节点出口,才能过白名单。所以这不是"国内服务错走国际代理",是有意为之。
     import ssl
     ctx = ssl.create_default_context()
     ctx.maximum_version = ssl.TLSVersion.TLSv1_2   # 实测该链路 TLS1.2 成功率最高
@@ -611,10 +618,6 @@ def bdecode(data):
         j = data.index(b':', i); n = int(data[i:j]); return data[j+1:j+1+n], j+1+n
     return parse(0)[0]
 
-def torrent_infohash(data):
-    import hashlib
-    return hashlib.sha1(bencode(bdecode(data)[b"info"])).hexdigest()
-
 def torrent_files(data):
     info = bdecode(data)[b'info']
     name = info[b'name'].decode('utf-8', 'ignore')
@@ -761,7 +764,6 @@ def human_size(n):
     return f"{n:.1f}PB"
 
 # ============ 名字解析 + TMDB 识别（整理器） ============
-CJK = re.compile(r'[一-鿿]')
 _CN_NUM = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10}
 _STOP = re.compile(r'^(19\d{2}|20\d{2}|\d{3,4}[pi]|2160p|1080p|720p|x26[45]|h\.?26[45]|hevc|avc|'
                    r'bluray|blu-ray|web-?dl|webrip|hdtv|remux|bdrip|dvdrip|uhd|hdr|dv|dts|ddp?\d|'
@@ -1819,7 +1821,7 @@ select.ksin option{color:#00206e}
 <div class=stat><div class=n>{{TOTAL}}</div><div class=l>已处理种子</div></div>
 <div class=stat><div class=n style=color:var(--pop)>{{INJECT}}</div><div class=l>累计辅种注入</div></div>
 <div class=stat><div class=n>{{DONE}}</div><div class=l>有匹配的种子</div></div>
-<div class=stat><div class=n class=mut>{{NOMATCH}}</div><div class=l>无匹配</div></div>
+<div class=stat><div class="n mut">{{NOMATCH}}</div><div class=l>无匹配</div></div>
 </div>
 <div class=card><h2>辅种记录 <span class=mut style=font-weight:400>· 每 {{INTERVAL}}s 扫描 · 点种子名看来源和去向 · 辅不上可手动关键词重搜</span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>在辅站数</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
 </div>
@@ -3025,25 +3027,6 @@ def gen_mediainfo(path):
             L.append(f"\nText #{ti}       : {s.get('codec_name','?')} {(_LANG.get(lg,lg))}".rstrip())
     return "\n".join(L)
 
-def pixhost_upload(jpg_bytes, fname="shot.jpg"):
-    """上传一张图到 pixhost(免费,无需账号)。返回 (show_url, th_url, full_url)"""
-    b = "----px" + str(int(time.time()*1000)); parts = []
-    def field(n, v): parts.append(("--"+b+f"\r\nContent-Disposition: form-data; name=\"{n}\"\r\n\r\n{v}\r\n").encode())
-    field("content_type", "0")
-    parts.append(("--"+b+f"\r\nContent-Disposition: form-data; name=\"img\"; filename=\"{fname}\"\r\n"
-                  "Content-Type: image/jpeg\r\n\r\n").encode())
-    parts.append(jpg_bytes); parts.append(b"\r\n"); parts.append(("--"+b+"--\r\n").encode())
-    req = urllib.request.Request("https://api.pixhost.to/images", data=b"".join(parts),
-          headers={"Content-Type": "multipart/form-data; boundary="+b, "Accept": "application/json"})
-    # pixhost 是境外服务,容器 DNS 常解析不了,和 TMDB 一样走代理(代理端解析域名)
-    opener = (urllib.request.build_opener(urllib.request.ProxyHandler(
-              {"http": CFG["TMDB_PROXY"], "https": CFG["TMDB_PROXY"]}))
-              if CFG["TMDB_PROXY"] else urllib.request.build_opener())
-    d = json.load(opener.open(req, timeout=40))
-    th = d.get("th_url", ""); show = d.get("show_url", "")
-    full = th.replace("//t", "//img", 1).replace("/thumbs/", "/images/") if th else ""
-    return show, th, full
-
 SHOTS_DIR = os.path.join(os.path.dirname(CFG["DB"]), "shots")
 def gen_shots(path, ih, n=4):
     """ffmpeg 均匀抽 n 帧 → 存本地 → 自托管公网直链(seed.leesy.cc/api/shot)。不依赖墙外图床。"""
@@ -3527,7 +3510,7 @@ class Handler(BaseHTTPRequestHandler):
         from urllib.parse import urlparse, parse_qs
         q = (parse_qs(urlparse(s.path).query).get("q",[""])[0]).strip()
         if not q: s._send_json({"ok":False,"err":"关键词为空"}); return
-        jid = str(int(time.time()*1000))
+        jid = str(int(time.time()*1000)) + "-" + base64.b16encode(os.urandom(2)).decode()  # 加随机尾防同毫秒撞号
         _SJOBS[jid] = {"log": [], "done": False, "result": None, "ts": time.time()}
         threading.Thread(target=_sjob_run, args=(jid, q), daemon=True).start()
         for k in [k for k, v in list(_SJOBS.items()) if time.time()-v["ts"] > 600 and k != jid]:
@@ -3657,11 +3640,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if time.time() - _DASH_MEDIA.get("ts", 0) > 600:
                 cnt = {"movie": 0, "tv": 0, "anime": 0, "song": 0}
-                for root, key in (("/data/media/movies", "movie"), ("/data/media/tv", "tv"), ("/data/media/anime", "anime")):
-                    if os.path.isdir(root):
+                for root, key in ((CFG["MEDIA_MOVIE"], "movie"), (CFG["MEDIA_TV"], "tv"),
+                                  (CFG["MEDIA_ANIME"], "anime")):   # 动漫库留空=归进 tv,这里跳过免重复计数
+                    if root and os.path.isdir(root):
                         ents = os.listdir(root)
                         cnt[key] = sum(1 for e in ents if os.path.isdir(os.path.join(root, e))) +                                    sum(1 for e in ents if e.lower().endswith((".mkv", ".mp4", ".ts", ".avi")))
-                mroot = "/data/media/music"
+                mroot = CFG["MEDIA_MUSIC"]
                 if os.path.isdir(mroot):
                     n = 0
                     for _r, _d, fs in os.walk(mroot):
