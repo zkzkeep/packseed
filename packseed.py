@@ -1790,6 +1790,7 @@ select.ksin option{color:#00206e}
 <a href="#media" class="tabbtn" data-t="media">📥 整理入库</a>
 <a href="#seed" class="tabbtn" data-t="seed">🌱 辅种</a>
 <a href="#keep" class="tabbtn" data-t="keep">🌊 保种转种</a>
+<a href="#health" class="tabbtn" data-t="health">🩺 做种健康</a>
 <a href="#logs" class="tabbtn" data-t="logs">📋 日志</a>
 <a href="#setup" class="tabbtn" data-t="setup">⚙️ 设置</a>
 </div>{{LOGOUT}}
@@ -1833,6 +1834,16 @@ select.ksin option{color:#00206e}
 <div class=stat><div class="n mut">{{NOMATCH}}</div><div class=l>无匹配</div></div>
 </div>
 <div class=card><h2>辅种记录 <span class=mut style=font-weight:400>· 每 {{INTERVAL}}s 扫描 · 点种子名看来源和去向 · 辅不上可手动关键词重搜</span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>在辅站数</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
+</div>
+<div id=tab-health class=tab>
+<div class=stats id=hstat>
+<div class=stat><div class=n id=h-total>—</div><div class=l>tr 做种总数</div></div>
+<div class=stat><div class=n style=color:var(--err) id=h-off>—</div><div class=l>tracker 掉线(白做)</div></div>
+<div class=stat><div class="n mut" id=h-dead>—</div><div class=l>0-peer 冷种</div></div>
+<div class=stat><div class=n style=color:#E8A400 id=h-up>—</div><div class=l>累计上传</div></div>
+</div>
+<div class=card><h2>🩺 做种健康 <span class=mut style=font-weight:400>· tracker 掉线=在做无效种,该处理 · 5分钟缓存 <button class=dlbtn style="padding:5px 16px;font-size:12px" onclick="healthLoad(this,1)">重新体检</button></span></h2>
+<div id=health style="padding:2px 20px 16px"><span class=mut>进入自动体检…</span></div></div>
 </div>
 <div id=tab-keep class=tab>
 <div class=card><h2>🌊 批量保种 <span class=mut style=font-weight:400>· 选站拉列表 → 筛选勾选 → 批量推 qb,下载完自动转 tr 做种 · 隔离在保种专用目录:不辅种/不入库/不打扰正常流水线,到期删目录即清仓 · 磁盘低于保护线自动暂停</span></h2>
@@ -1931,6 +1942,46 @@ function showTab(t){
  armReload(el?t:'search');
  if(t=='dl'){pollDl();_dlT=setInterval(pollDl,4000);}
  if(t=='keep'){ksInit();_ksT=setInterval(ksStatus,3000);}
+ if(t=='health'){healthLoad(null,0);}
+}
+var _hLoaded=false;
+function healthLoad(btn,force){
+ if(btn){btn.disabled=true;btn.textContent='体检中…';}
+ else if(_hLoaded)return;
+ var el=document.getElementById('health');
+ if(!_hLoaded)el.innerHTML='<span class=mut>正在读 tr 全部种子的 tracker 状态,几秒钟…</span>';
+ fetch('/api/health'+(force?'?force=1':'')).then(r=>r.json()).then(function(d){
+  if(btn){btn.disabled=false;btn.textContent='重新体检';}
+  _hLoaded=true;
+  if(!d.ok){el.innerHTML='<span class=mut>体检失败: '+(d.err||'')+'</span>';return;}
+  document.getElementById('h-total').textContent=d.total;
+  document.getElementById('h-off').textContent=d.offline.length;
+  document.getElementById('h-dead').textContent=d.dead_n;
+  document.getElementById('h-up').textContent=d.up_total;
+  var h='';
+  if(d.offline.length){
+   h+='<div class=sgrp>🔴 Tracker 掉线('+d.offline.length+') <span class=mut style=font-weight:400>· announce 失败=这些种在做但没向站汇报,等于白做,去 tr 里删了重加或换 tracker</span></div>';
+   h+='<table><tr><th>种子</th><th class=r>体积</th><th>掉线的 tracker</th></tr>';
+   d.offline.forEach(function(x){
+    var tk=x.trackers.map(t=>'<div class=mut style="font-size:12px">'+t.host+' — '+t.msg+'</div>').join('');
+    h+='<tr><td class=name title="'+x.name.replace(/"/g,'')+'">'+x.name+'</td><td class=r>'+x.sizeh+'</td><td>'+tk+'</td></tr>';
+   });
+   h+='</table>';
+  }
+  if(d.errored.length){
+   h+='<div class=sgrp>⚠️ tr 报错种子('+d.errored.length+')</div><table><tr><th>种子</th><th class=r>体积</th><th>错误</th></tr>';
+   d.errored.forEach(function(x){h+='<tr><td class=name>'+x.name+'</td><td class=r>'+x.sizeh+'</td><td class=mut>'+x.err+'</td></tr>';});
+   h+='</table>';
+  }
+  if(d.dead.length){
+   h+='<div class=sgrp>🧊 0-peer 冷种('+d.dead_n+') <span class=mut style=font-weight:400>· 没人下也没别的做种者,占空间但不产上传 · 保种目录的已排除 · 要清理去 tr 里删 · 按闲置降序</span></div>';
+   h+='<table><tr><th>种子</th><th class=r>体积</th><th class=r>闲置</th><th class=r>累计上传</th></tr>';
+   d.dead.forEach(function(x){h+='<tr><td class=name title="'+x.name.replace(/"/g,'')+'">'+x.name+'</td><td class=r>'+x.sizeh+'</td><td class=r>'+x.idle+' 天</td><td class=r class=mut>'+x.up+'</td></tr>';});
+   h+='</table>';
+  }
+  if(!d.offline.length&&!d.errored.length&&!d.dead.length)h='<div style="padding:20px;text-align:center;font-size:15px">🎉 全部健康,没有掉线 tracker、报错种子或 0-peer 冷种</div>';
+  el.innerHTML=h;
+ }).catch(function(){if(btn){btn.disabled=false;btn.textContent='重新体检';}el.innerHTML='<span class=mut>体检出错</span>';});
 }
 var SM={downloading:'⬇️ 下载中',stalledDL:'🐢 等速度',metaDL:'🧲 元数据',forcedDL:'⬇️ 下载中',pausedDL:'⏸ 暂停',queuedDL:'⏳ 排队',allocating:'分配空间',uploading:'✅ 完成·待转种',stalledUP:'✅ 完成·待转种',queuedUP:'✅ 完成·待转种',forcedUP:'✅ 完成·待转种',checkingDL:'🔍 校验中',checkingUP:'🔍 校验中',checkingResumeData:'🔍 校验中',error:'❌ 错误',missingFiles:'❌ 文件缺失'};
 var STM={done:['✅ 已入库+转种','done'],hold:['⚠️ 待确认(去整理入库页处理)','nomatch'],processing:['🔄 整理中','searching'],error:['❌ 出错','err']};
@@ -2941,6 +2992,47 @@ def gap_report():
     rows.sort(key=lambda x: len(x["missing"]))
     return {"ok": True, "sites": len(all_sites), "rows": rows}
 
+_HEALTH_CACHE = {"ts": 0, "d": None}
+def health_report(force=False):
+    """做种健康体检:tracker掉线(白做)、0-peer冷种、tr错误种子。缓存5分钟(遍历几千种较重)"""
+    if not force and _HEALTH_CACHE["d"] and time.time() - _HEALTH_CACHE["ts"] < 300:
+        return _HEALTH_CACHE["d"]
+    fields = ["name", "totalSize", "status", "error", "errorString", "peersConnected",
+              "activityDate", "trackerStats", "downloadDir", "uploadRatio", "uploadedEver"]
+    try:
+        ts = TR().call("torrent-get", {"fields": fields}).get("arguments", {}).get("torrents", [])
+    except Exception as e:
+        return {"ok": False, "err": str(e)[:60]}
+    now = time.time()
+    keep = (CFG["KEEP_DIR"] or "").rstrip("/")
+    offline, dead, errored = [], [], []
+    up_total = 0
+    for t in ts:
+        name = t.get("name", ""); size = t.get("totalSize", 0)
+        dd = t.get("downloadDir", "")
+        up_total += t.get("uploadedEver", 0) or 0
+        if t.get("error"):
+            errored.append({"name": name, "sizeh": human_size(size), "err": (t.get("errorString") or "")[:80]})
+        bad = []; best_seed = -1; best_leech = 0
+        for tk in t.get("trackerStats", []):
+            if tk.get("lastAnnounceTime", 0) > 0 and not tk.get("lastAnnounceSucceeded"):
+                bad.append({"host": tk.get("host", "?"), "msg": (tk.get("lastAnnounceResult") or "无响应")[:50]})
+            sc = tk.get("seederCount", -1)
+            if sc is not None and sc >= 0: best_seed = max(best_seed, sc)
+            best_leech = max(best_leech, tk.get("leecherCount", 0) or 0)
+        if bad:
+            offline.append({"name": name, "sizeh": human_size(size), "trackers": bad})
+        # 0-peer 冷种:做种状态,tracker报告只有自己(或没有)在做种、且无人下载。保种目录的冷种是本意,不算异常
+        idle = int((now - t.get("activityDate", now)) / 86400) if t.get("activityDate") else 0
+        if t.get("status") == 6 and 0 <= best_seed <= 1 and best_leech == 0 and not (keep and dd.startswith(keep)):
+            dead.append({"name": name, "sizeh": human_size(size), "idle": idle,
+                         "up": human_size(t.get("uploadedEver", 0) or 0)})
+    dead.sort(key=lambda x: -x["idle"])
+    d = {"ok": True, "total": len(ts), "up_total": human_size(up_total),
+         "offline": offline, "dead": dead[:200], "dead_n": len(dead), "errored": errored}
+    _HEALTH_CACHE.update(ts=time.time(), d=d)
+    return d
+
 def gap_verify(ih):
     """逐站核实:对该内容真的去全站搜一遍,准确报出哪些站有、哪些站真缺。
     (缺种报告默认基于辅种记录反推,会把'我们没辅到但站上其实有'的站误报为缺,发种前用这个核实。)"""
@@ -3313,6 +3405,10 @@ class Handler(BaseHTTPRequestHandler):
             s._dashboard(); return
         if s.path.startswith("/api/ks/"):
             s._ks(); return
+        if s.path.startswith("/api/health"):
+            from urllib.parse import urlparse, parse_qs
+            force = parse_qs(urlparse(s.path).query).get("force") == ["1"]
+            s._send_json(health_report(force)); return
         if s.path.startswith("/api/gapverify"):
             from urllib.parse import urlparse, parse_qs
             q_ = parse_qs(urlparse(s.path).query)
@@ -3898,11 +3994,17 @@ def cleanup_db():
 
 def housekeeper():
     time.sleep(120)
-    last_bak = last_clean = 0
+    last_bak = last_clean = last_health = 0
     while True:
         try:
             if time.time() - last_bak > 86400:   backup_data(); last_bak = time.time()
             if time.time() - last_clean > 86400:  cleanup_db(); last_clean = time.time()
+            if time.time() - last_health > 86400:   # 每天体检一次,掉线 tracker 推告警
+                last_health = time.time()
+                r = health_report(force=True)
+                if r.get("ok") and r.get("offline"):
+                    notify("🩺 做种健康提醒", f"{len(r['offline'])} 个种子 tracker 掉线(在做无效种),"
+                           f"另有 {r['dead_n']} 个 0-peer 冷种。面板『做种健康』查看")
         except Exception as e:
             logmsg("ERROR", f"维护任务异常: {e}")
         time.sleep(3600)
