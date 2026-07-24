@@ -1681,15 +1681,15 @@ width:26px;height:26px;font-size:13px;cursor:pointer;opacity:0;transition:.18s;l
 .dcx:hover{background:rgba(255,90,80,.95)}
 .dfree{position:absolute;top:7px;left:7px;background:rgba(255,212,0,.92);color:#00206e;border-radius:980px;padding:2px 8px;font-size:11px;font-weight:800}
 .voy{padding:0;overflow:hidden}
-.voysea{position:relative;height:132px;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(0,20,90,.30))}
-.voyw{position:absolute;left:0;bottom:0;width:200%;height:100%;fill:rgba(255,255,255,.16);animation:voyflow 9s linear infinite}
-.voyw2{fill:rgba(207,224,255,.20);animation-duration:6.5s;animation-direction:reverse;opacity:.9}
-.voyw3{fill:rgba(255,255,255,.30);animation-duration:4.5s}
+.voysea{position:relative;height:150px;background:linear-gradient(180deg,#5b8dff 0%,#2a63e8 42%,#123fc4 100%)}
+.voyw{position:absolute;left:0;bottom:0;width:200%;height:78%;animation:voyflow 13s linear infinite}
+.voyw2{height:66%;animation-duration:9s;animation-direction:reverse}
+.voyw3{height:52%;animation-duration:6.5s}
 @keyframes voyflow{from{transform:translateX(0)}to{transform:translateX(-50%)}}
-.voyboat{position:absolute;bottom:40px;left:8px;line-height:0;animation:voybob 2.6s ease-in-out infinite alternate;
-transition:left 1.1s cubic-bezier(.35,.7,.35,1);filter:drop-shadow(0 5px 12px rgba(0,10,60,.6));z-index:2}
-@keyframes voybob{from{transform:translateY(0) rotate(-7deg)}to{transform:translateY(-8px) rotate(7deg)}}
-.voyhome{position:absolute;right:18px;bottom:42px;line-height:0;filter:drop-shadow(0 5px 14px rgba(0,10,60,.5))}
+.voyboat{position:absolute;bottom:52px;left:10px;line-height:0;animation:voybob 3.4s ease-in-out infinite alternate;
+transition:left 2.4s cubic-bezier(.4,.15,.35,1);filter:drop-shadow(0 6px 14px rgba(0,10,60,.55));z-index:3}
+@keyframes voybob{from{transform:translateY(2px) rotate(-6deg)}to{transform:translateY(-7px) rotate(6deg)}}
+.voyhome{position:absolute;right:20px;bottom:54px;line-height:0;z-index:2;filter:drop-shadow(0 6px 16px rgba(0,10,60,.45))}
 .voylamp{animation:voyglow 2.8s ease-in-out infinite alternate;transform-origin:22px 16px}
 @keyframes voyglow{from{opacity:.14;transform:scale(.8)}to{opacity:.5;transform:scale(1.5)}}
 .voytext{padding:14px 22px 18px;display:flex;justify-content:space-between;align-items:baseline;gap:14px;flex-wrap:wrap}
@@ -2302,33 +2302,52 @@ function doSearch(){
 }
 var VOYAGE=''
 +'<div class="voy card"><div class=voysea>'
-+'<svg class=voyw viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,70 C150,30 300,110 450,70 C600,30 750,110 900,70 C1050,30 1200,110 1350,70 L1350,120 L0,120 Z"/></svg>'
-+'<svg class="voyw voyw2" viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,80 C150,50 300,110 450,80 C600,50 750,110 900,80 C1050,50 1200,110 1350,80 L1350,120 L0,120 Z"/></svg>'
-+'<svg class="voyw voyw3" viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,90 C200,68 320,112 520,90 C700,70 820,112 1020,90 C1160,76 1240,104 1400,90 L1400,120 L0,120 Z"/></svg>'
-+'<div class=voyboat><svg viewBox="0 0 40 44" width="34" height="37">'
-+'<path d="M20 2 L20 30 L6 30 Z" fill="#ffffff" opacity=".97"/>'
-+'<path d="M23 9 L23 30 L34 30 Z" fill="#CFE0FF" opacity=".92"/>'
-+'<rect x="19.2" y="1" width="1.8" height="30" rx=".9" fill="#ffffff"/>'
-+'<path d="M2 32 L38 32 L32 40 L8 40 Z" fill="#FFD400"/></svg></div>'
-+'<div class=voyhome><svg viewBox="0 0 44 52" width="38" height="45">'
-+'<path d="M14 20 L30 20 L33 46 L11 46 Z" fill="#ffffff" opacity=".95"/>'
-+'<path d="M15.2 27 L28.8 27 L29.4 33 L14.6 33 Z" fill="#CFE0FF" opacity=".95"/>'
-+'<rect x="15" y="12" width="14" height="8" rx="2" fill="#FFD400"/>'
-+'<path d="M13 12 L31 12 L27 5 L17 5 Z" fill="#ffffff" opacity=".95"/>'
-+'<circle class=voylamp cx="22" cy="16" r="9" fill="#FFD400" opacity=".28"/>'
-+'<rect x="7" y="46" width="30" height="4" rx="2" fill="#ffffff" opacity=".6"/></svg></div></div>'
++'<div class=voyboat><svg viewBox="0 0 46 46" width="38" height="38">'
++'<path d="M22.5 3 C22.5 3 12.5 15 9.5 27 L22.5 27 Z" fill="#ffffff" opacity=".96"/>'
++'<path d="M25.5 11 C25.5 11 32 18 35 27 L25.5 27 Z" fill="#CFE0FF" opacity=".9"/>'
++'<path d="M23.6 2 C24.2 2 24.6 2.5 24.5 3.1 L24.2 28 L22.8 28 L22.6 3.1 C22.6 2.5 23 2 23.6 2 Z" fill="#fff"/>'
++'<path d="M5 30 C5 30 14 33 23 33 C32 33 41 30 41 30 C41 30 37.5 39.5 32 41 C27 42.4 19 42.4 14 41 C8.5 39.5 5 30 5 30 Z" fill="#FFD400"/>'
++'<path d="M5.6 30.6 C13 32.6 33 32.6 40.4 30.6" stroke="#fff" stroke-width="1.4" fill="none" opacity=".55"/></svg></div>'
++'<div class=voyhome><svg viewBox="0 0 46 54" width="40" height="47">'
++'<circle class=voylamp cx="23" cy="15" r="10" fill="#FFD400" opacity=".26"/>'
++'<path d="M17 22 C17 22 16 34 13.5 46 L32.5 46 C30 34 29 22 29 22 Z" fill="#ffffff" opacity=".95"/>'
++'<path d="M16.4 28 L29.6 28 C29.8 30.4 30 32.6 30.3 34 L15.7 34 C16 32.6 16.2 30.4 16.4 28 Z" fill="#CFE0FF" opacity=".95"/>'
++'<rect x="16.4" y="13.5" width="13.2" height="8.5" rx="2.4" fill="#FFD400"/>'
++'<path d="M14.5 13.5 C14.5 13.5 18 5 23 4 C28 5 31.5 13.5 31.5 13.5 Z" fill="#ffffff" opacity=".95"/>'
++'<circle cx="23" cy="3" r="1.8" fill="#FFD400"/>'
++'<path d="M9 46 L37 46 C38.2 46 39 46.9 39 48 C39 49.1 38.2 50 37 50 L9 50 C7.8 50 7 49.1 7 48 C7 46.9 7.8 46 9 46 Z" fill="#ffffff" opacity=".62"/></svg></div>'
++'<svg class="voyw voyw1" viewBox="0 0 1200 120" preserveAspectRatio="none">'
++'<path d="M0,62 C150,26 300,98 450,62 C600,26 750,98 900,62 C1050,26 1200,98 1350,62 L1350,120 L0,120 Z" fill="#1443c9"/>'
++'<path d="M0,62 C150,26 300,98 450,62 C600,26 750,98 900,62 C1050,26 1200,98 1350,62" fill="none" stroke="#ffffff" stroke-width="3" opacity=".55"/></svg>'
++'<svg class="voyw voyw2" viewBox="0 0 1200 120" preserveAspectRatio="none">'
++'<path d="M0,76 C150,46 300,106 450,76 C600,46 750,106 900,76 C1050,46 1200,106 1350,76 L1350,120 L0,120 Z" fill="#0b34ae"/>'
++'<path d="M0,76 C150,46 300,106 450,76 C600,46 750,106 900,76 C1050,46 1200,106 1350,76" fill="none" stroke="#ffffff" stroke-width="3.4" opacity=".72"/></svg>'
++'<svg class="voyw voyw3" viewBox="0 0 1200 120" preserveAspectRatio="none">'
++'<path d="M0,92 C200,70 320,114 520,92 C700,72 820,114 1020,92 C1160,78 1240,106 1400,92 L1400,120 L0,120 Z" fill="#04248c"/>'
++'<path d="M0,92 C200,70 320,114 520,92 C700,72 820,114 1020,92 C1160,78 1240,106 1400,92" fill="none" stroke="#ffffff" stroke-width="3" opacity=".9"/></svg>'
++'</div>'
 +'<div class=voytext><div class=voystage>启航</div><div class=voynum><b id=voyhits>0</b> 条线索已入网</div></div></div>';
+var _voyT=0;
 function pollJob(id,box,t0){
  fetch('/api/searchstat?id='+id).then(r=>r.json()).then(function(j){
   if(!j.ok){box.innerHTML='<div class=mut style="padding:10px 16px">'+(j.err||'任务丢失')+'</div>';return;}
   if(!j.done){
    var p=j.prog||{},tot=p.total||0,dn=p.done||0;
-   var pct=tot?Math.min(96,Math.round(dn/tot*100)):8;
-   if(!box.querySelector('.voy')){box.innerHTML=VOYAGE;}
+   // 航程分两段:巡海(各站回话)只占前55%,归航(识别配图)渐近逼近但绝不提前靠岸
+   var pct;
+   if(p.stage=='归航'){
+    if(!_voyT)_voyT=Date.now();
+    var el2=(Date.now()-_voyT)/1000;
+    pct=55+36*(1-Math.exp(-el2/9));          // 越近岸越慢,像真的在减速入港
+   }else{
+    pct=6+(tot?dn/tot:0)*49;
+   }
+   if(!box.querySelector('.voy')){box.innerHTML=VOYAGE;_voyT=0;}
    var boat=box.querySelector('.voyboat');
-   if(boat)boat.style.left='calc('+pct+'% - 18px)';
+   if(boat)boat.style.left='calc('+pct.toFixed(1)+'% - 19px)';
    var st=box.querySelector('.voystage');
-   if(st)st.textContent=(p.stage||'启航')+' · 已行 '+Math.round((Date.now()-t0)/1000)+' 秒'+(tot?' · 途经 '+dn+'/'+tot+' 港':'');
+   var stx=(p.stage=='归航')?'归航 · 正在辨认海图':((p.stage||'启航')+(tot?' · 途经 '+dn+'/'+tot+' 港':''));
+   if(st)st.textContent=stx+' · 已行 '+Math.round((Date.now()-t0)/1000)+' 秒';
    var hs=box.querySelector('#voyhits');
    if(hs)hs.textContent=p.hits||0;
    setTimeout(function(){pollJob(id,box,t0);},1200);
