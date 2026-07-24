@@ -1733,7 +1733,7 @@ select.ksin option{color:#00206e}
 <a href="#keep" class="tabbtn" data-t="keep">🌊 保种转种</a>
 <a href="#logs" class="tabbtn" data-t="logs">📋 日志</a>
 <a href="#setup" class="tabbtn" data-t="setup">⚙️ 设置</a>
-</div>
+</div>{{LOGOUT}}
 <div id=tab-dl class=tab>
 <div class=card><h2>⬇️ 下载中 <span class=mut style=font-weight:400>· qb 实时进度 · 4 秒刷新 · 下载完自动入库+转种,随后见「整理入库」</span></h2><div id=dlist style="padding:2px 16px 12px"><span class=mut>载入中…</span></div></div>
 <div class=card><h2>最近完成的流水线</h2><div id=ddone></div></div>
@@ -1842,6 +1842,10 @@ select.ksin option{color:#00206e}
 </div><div id=toast></div>
 <script>
 var _dlT=null;var _t=null;var _ksT=null;
+var _of=window.fetch;   // 会话过期(401)自动送回登录页,不再半死不活
+window.fetch=function(){return _of.apply(this,arguments).then(function(r){
+ if(r.status==401){location.href='/login';}
+ return r;});};
 function armReload(t){
  clearTimeout(_t);_t=null;
  if(t=='seed'||t=='media'||t=='logs')_t=setTimeout(()=>location.reload(),20000);  // 只有表格页才自动刷新
@@ -2751,6 +2755,56 @@ def xfer_pack(ih):
     return {"ok": True, "title": name, "sub": sub, "desc": desc,
             "sizeh": human_size(size), "files": nfiles,
             "tip": "上传时直接用原站 .torrent(NexusPHP 会自动换 passkey 重签);目标站若强制 source 标记需重制种子。发布前请再核对目标站发种规则。"}
+# ============ 登录页(告别浏览器原生 Basic 弹窗) ============
+_SESS = {}          # token -> 过期时间戳
+SESS_DAYS = 30
+def new_session():
+    import secrets
+    t = secrets.token_urlsafe(24)
+    _SESS[t] = time.time() + SESS_DAYS * 86400
+    if len(_SESS) > 200:                       # 顺手清过期的
+        for k, v in list(_SESS.items()):
+            if v < time.time(): _SESS.pop(k, None)
+    return t
+def sess_ok(tok):
+    exp = _SESS.get(tok or "")
+    return bool(exp and exp > time.time())
+
+LOGIN_PAGE = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>观澜 Wavegazer · 登录</title><link rel="icon" href="/favicon.ico" type="image/svg+xml"><style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;color:#fff;font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased;
+display:flex;align-items:center;justify-content:center;overflow:hidden;
+background:radial-gradient(1100px 520px at 85% -8%,rgba(255,255,255,.10),transparent 60%),linear-gradient(180deg,#0039c8 0%,#002FA7 38%,#001d77 100%);background-color:#002FA7}
+#bgv{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;opacity:.55}
+#veil{position:fixed;inset:0;z-index:1;background:linear-gradient(180deg,rgba(0,32,120,.45),rgba(0,25,100,.82))}
+.box{position:relative;z-index:2;width:min(400px,92vw);padding:38px 34px 30px;border-radius:26px;
+background:rgba(255,255,255,.15);backdrop-filter:blur(26px);border:1px solid rgba(255,255,255,.30);box-shadow:0 30px 90px rgba(0,10,60,.55);text-align:center}
+.brand{display:flex;align-items:center;justify-content:center;gap:11px;font-size:25px;font-weight:800;letter-spacing:-.02em}
+.en{font-size:14px;font-weight:600;color:rgba(255,255,255,.62);letter-spacing:.05em;margin-top:3px}
+.tip{color:rgba(255,255,255,.7);font-size:12.5px;margin:6px 0 24px}
+input{width:100%;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.16);color:#fff;border-radius:13px;padding:13px 16px;font-size:14px;outline:none;margin-bottom:12px;transition:.18s}
+input::placeholder{color:rgba(255,255,255,.62)}
+input:focus{background:rgba(255,255,255,.22);box-shadow:0 0 0 3px rgba(255,255,255,.45)}
+button{width:100%;background:#fff;color:#002FA7;border:none;border-radius:980px;padding:13px;font-size:15px;font-weight:800;cursor:pointer;transition:.18s;margin-top:6px}
+button:hover{transform:translateY(-1px);box-shadow:0 10px 26px rgba(0,10,60,.4)}
+button:active{transform:none}
+.err{color:#FFD400;font-size:13px;font-weight:700;min-height:20px;margin-top:12px}
+.foot{position:fixed;bottom:18px;left:0;right:0;text-align:center;color:rgba(255,255,255,.5);font-size:12px;z-index:2}
+</style></head><body>
+<video id=bgv autoplay muted loop playsinline poster="/api/bg" src="/api/bgv?v=2"></video><div id=veil></div>
+<form class=box method=post action="/login">
+<div class=brand><svg width="34" height="34" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="14" fill="#0a2fb5"/><circle cx="46" cy="17" r="7.5" fill="#FFD400"/><path d="M2 37c7-9 15-9 21 0s15 9 21 0 12-8 18-3v30H2z" fill="#ffffff" opacity="0.95"/><path d="M2 47c7-7 13-7 19 0s15 7 21 0 14-7 20-1v18H2z" fill="#CFE0FF" opacity="0.9"/></svg>观澜</div>
+<div class=en>WAVEGAZER</div>
+<div class=tip>观影观澜 · 站在岸上看自己的海</div>
+<input name=u placeholder="用户名" autocomplete=username autofocus>
+<input name=p type=password placeholder="密码" autocomplete=current-password>
+<button type=submit>进 港</button>
+<div class=err>{{ERR}}</div>
+</form>
+<div class=foot>观澜 Wavegazer · 一个人的影音港湾 · MIT 开源</div>
+</body></html>"""
+
 FAVICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
  '<rect width="64" height="64" rx="14" fill="#002FA7"/>'
  '<circle cx="46" cy="17" r="7.5" fill="#FFD400"/>'
@@ -2760,11 +2814,18 @@ FAVICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(s, *a): pass
+    def _cookie(s, name):
+        for kv in (s.headers.get("Cookie") or "").split(";"):
+            k, _, v = kv.strip().partition("=")
+            if k == name: return v
+        return ""
     def _auth_ok(s):
         u, p = CFG["AUTH_USER"], CFG["AUTH_PASS"]
         if not u:  # 未配置账号密码 = 不启用登录
             return True
-        hdr = s.headers.get("Authorization", "")
+        if sess_ok(s._cookie("gl_sess")):        # 网页登录会话(自家登录页发的)
+            return True
+        hdr = s.headers.get("Authorization", "")  # 保留 Basic:给 curl/脚本用
         if hdr.startswith("Basic "):
             try:
                 dec = base64.b64decode(hdr[6:]).decode("utf-8", "ignore")
@@ -2773,15 +2834,39 @@ class Handler(BaseHTTPRequestHandler):
                     return True
             except Exception:
                 pass
-        s.send_response(401)
-        s.send_header("WWW-Authenticate", 'Basic realm="PackSeed"')
-        s.send_header("Content-Type", "text/plain; charset=utf-8")
-        s.end_headers()
-        s.wfile.write("需要登录".encode())
+        if s.path.startswith("/api"):            # 接口:给 401 让前端自己跳
+            s.send_response(401); s.send_header("Content-Type", "application/json")
+            s.end_headers(); s.wfile.write(b'{"ok":false,"err":"unauth"}')
+        else:                                    # 页面:跳自家登录页
+            s.send_response(302); s.send_header("Location", "/login"); s.end_headers()
         return False
+    def _login_page(s, err=""):
+        body = LOGIN_PAGE.replace("{{ERR}}", esc(err)).encode()
+        s.send_response(200); s.send_header("Content-Type", "text/html; charset=utf-8")
+        s.send_header("Cache-Control", "no-store")
+        s.send_header("Content-Length", str(len(body)))
+        s.end_headers(); s.wfile.write(body)
+    def _login_post(s):
+        try:
+            ln = int(s.headers.get("Content-Length", "0"))
+            f = urllib.parse.parse_qs(s.rfile.read(ln).decode("utf-8", "ignore"))
+        except Exception:
+            f = {}
+        gu = (f.get("u", [""])[0]).strip(); gp = f.get("p", [""])[0]
+        if gu == CFG["AUTH_USER"] and gp == CFG["AUTH_PASS"] and CFG["AUTH_USER"]:
+            tok = new_session()
+            s.send_response(302); s.send_header("Location", "/")
+            s.send_header("Set-Cookie", f"gl_sess={tok}; Path=/; Max-Age={SESS_DAYS*86400}; HttpOnly; SameSite=Lax")
+            s.end_headers()
+            logmsg("INFO", "面板登录成功")
+        else:
+            time.sleep(1)                        # 挡一下暴力猜密码
+            s._login_page("用户名或密码不对,再试试")
     def do_POST(s):
         if s.path.startswith("/api/wecom"):
             s._wecom_post(); return
+        if s.path.startswith("/login"):
+            s._login_post(); return
         if not s._auth_ok():
             return
         if s.path.startswith("/api/dl"):
@@ -2806,6 +2891,15 @@ class Handler(BaseHTTPRequestHandler):
             s._bgv(); return             # 海浪视频背景,免登录
         if s.path.startswith("/api/bg"):
             s._bg(); return              # 首页海浪背景图,免登录
+        if s.path.startswith("/login"):
+            if not CFG["AUTH_USER"] or sess_ok(s._cookie("gl_sess")):
+                s.send_response(302); s.send_header("Location", "/"); s.end_headers(); return
+            s._login_page(); return
+        if s.path.startswith("/logout"):
+            _SESS.pop(s._cookie("gl_sess"), None)
+            s.send_response(302); s.send_header("Location", "/login")
+            s.send_header("Set-Cookie", "gl_sess=; Path=/; Max-Age=0")
+            s.end_headers(); return
         if s.path.startswith("/favicon"):
             s.send_response(200); s.send_header("Content-Type", "image/svg+xml")
             s.send_header("Cache-Control", "max-age=604800")
@@ -2900,6 +2994,8 @@ class Handler(BaseHTTPRequestHandler):
                     .replace("{{MEDIA}}", media_rows or "<tr><td colspan=5 class=mut>暂无入库记录</td></tr>")
                     .replace("{{RECENT}}", recent or "<div class=mut style='padding:4px 0 8px'>还没有带海报的入库记录,下一部片就有了</div>")
                     .replace("{{EMBYPUB}}", os.environ.get("EMBY_PUBLIC", "https://emby.leesy.cc"))
+                    .replace("{{LOGOUT}}", ('<a href="/logout" class="tabbtn" style="float:right;color:rgba(255,255,255,.55)" '
+                                            'title="退出登录">🚪 退出</a>') if CFG["AUTH_USER"] else "")
                     .replace("{{LOGS}}", logs or "<tr><td colspan=2 class=mut>—</td></tr>"))
         b = html.encode("utf-8")
         s.send_response(200); s.send_header("Content-Type","text/html; charset=utf-8")
