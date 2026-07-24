@@ -1860,7 +1860,7 @@ select.ksin option{color:#00206e}
 </div>
 <div class=card><h2>📦 保种任务 <span class=mut style=font-weight:400>· 队列逐个下载推 qb · <button class=dlbtn style="padding:4px 14px;font-size:12px;background:rgba(255,255,255,.2);color:#fff" onclick="ksStop()">⏹ 停止并清空队列</button></span></h2>
 <div id=ks-stat style="padding:0 20px 16px"><span class=mut>暂无任务</span></div></div>
-<div class=card><h2>🧭 缺种报告 <span class=mut style=font-weight:400>· 每个内容在哪些站做种、哪些站搜不到 · 搜不到≠一定没有,转种前自己再确认一眼 · 带禁转标记的资料包直接拦</span> <button class=dlbtn style="padding:5px 16px;font-size:12px" onclick="gapLoad(this)">刷新</button></h2>
+<div class=card><h2>🧭 缺种报告 <span class=mut style=font-weight:400>· 缺种列基于「观澜辅到了哪些站」反推,会把没辅到但站上其实有的误报为缺 · 发种前点「🔍 核实」对这部剧真去全站搜一遍,拿准确名单 · 带禁转标记的资料包直接拦</span> <button class=dlbtn style="padding:5px 16px;font-size:12px" onclick="gapLoad(this)">刷新</button></h2>
 <div id=gap style="padding:0 20px 16px"><span class=mut>点「刷新」生成(要请求 Prowlarr,几秒钟)</span></div></div>
 <div id=xf-ov onclick="this.classList.remove('show')"><div id=xf-box onclick="event.stopPropagation()">
 <div style="font-size:17px;font-weight:800;margin-bottom:4px">🚚 发种资料包 <span class=mut id=xf-meta style=font-weight:400></span></div>
@@ -2092,11 +2092,24 @@ function gapLoad(btn){
    var nm=r.name.replace(/&/g,'&amp;').replace(/</g,'&lt;');
    var on=r.seeded.map(s=>'<span class="chip on">'+s+'</span>').join('');
    var off=r.missing.slice(0,12).map(s=>'<span class="chip off">'+s+'</span>').join('')+(r.missing.length>12?'<span class=mut> +'+(r.missing.length-12)+'</span>':'');
-   h+='<tr><td class=name title="'+nm+'">'+nm+'</td><td class=r>'+r.sizeh+'</td><td>'+on+'</td><td>'+(r.missing.length?off:'<span class=mut>全覆盖 🎉</span>')+'</td>'
-    +'<td>'+(r.missing.length?'<button class=dlbtn style="padding:5px 14px;font-size:12px" data-h="'+r.hash+'" onclick="xfer(this.dataset.h)">🚚 资料包</button>':'')+'</td></tr>';
+   h+='<tr data-sites="'+d.sites+'"><td class=name title="'+nm+'">'+nm+'</td><td class=r>'+r.sizeh+'</td><td class=gseed>'+on+'</td><td class=gmiss>'+(r.missing.length?off:'<span class=mut>全覆盖 🎉</span>')+'</td>'
+    +'<td style="white-space:nowrap"><button class=dlbtn style="padding:5px 12px;font-size:12px;background:rgba(255,255,255,.2);color:#fff" data-h="'+r.hash+'" onclick="gapV(this.dataset.h,this)">🔍 核实</button> '
+    +(r.missing.length?'<button class=dlbtn style="padding:5px 12px;font-size:12px" data-h="'+r.hash+'" onclick="xfer(this.dataset.h)">🚚 资料包</button>':'')+'</td></tr>';
   });
   el.innerHTML=h+'</table>';
  }).catch(function(){if(btn){btn.disabled=false;btn.textContent='刷新';}});
+}
+function gapV(h,btn){
+ btn.disabled=true;btn.dataset.o=btn.textContent;btn.textContent='核实中…约30秒';
+ fetch('/api/gapverify?hash='+h).then(r=>r.json()).then(function(d){
+  btn.disabled=false;btn.textContent=d.ok?'✅ 已核实':btn.dataset.o;
+  if(!d.ok){toast('核实失败: '+(d.err||''));return;}
+  var tr=btn.closest('tr');
+  tr.querySelector('.gseed').innerHTML=d.have.map(s=>'<span class="chip on">'+s+'</span>').join('')||'<span class=mut>各站都没搜到</span>';
+  var off=d.missing.slice(0,14).map(s=>'<span class="chip off">'+s+'</span>').join('')+(d.missing.length>14?'<span class=mut> +'+(d.missing.length-14)+'</span>':'');
+  tr.querySelector('.gmiss').innerHTML=d.missing.length?off:'<span class=mut>全覆盖 🎉</span>';
+  toast('实搜「'+d.q+'」: '+d.have.length+' 站有,'+d.missing.length+' 站真缺');
+ }).catch(function(){btn.disabled=false;btn.textContent=btn.dataset.o;toast('核实出错');});
 }
 var _xfHash='';
 function xfer(h){
@@ -2917,6 +2930,26 @@ def gap_report():
     rows.sort(key=lambda x: len(x["missing"]))
     return {"ok": True, "sites": len(all_sites), "rows": rows}
 
+def gap_verify(ih):
+    """逐站核实:对该内容真的去全站搜一遍,准确报出哪些站有、哪些站真缺。
+    (缺种报告默认基于辅种记录反推,会把'我们没辅到但站上其实有'的站误报为缺,发种前用这个核实。)"""
+    c = db(); t = c.execute("SELECT name,size FROM torrents WHERE info_hash=?", (ih,)).fetchone(); c.close()
+    if not t: return {"ok": False, "err": "找不到该种子"}
+    name, size = t
+    q = extract_query(name) or name
+    try: results = prowlarr_search_fan(q)
+    except Exception as e: return {"ok": False, "err": str(e)[:60]}
+    try: all_sites = [i.get("name", "?") for i in prowlarr_indexers()]
+    except Exception: all_sites = []
+    ban = [b.strip().lower() for b in CFG["TR_BAN_SITES"].split(",") if b.strip()]
+    # 宽松口径:该站能搜到这个剧(标题相关)即算"有"——发种是别重复占坑,不是文件级辅种
+    have = {(r.get("indexer") or "") for r in results if r.get("indexer")}
+    low = {s.lower() for s in have}
+    missing = [s for s in all_sites if s.lower() not in low
+               and not any(s.lower() in l or l in s.lower() for l in low)
+               and not any(b in s.lower() for b in ban)]
+    return {"ok": True, "have": sorted(have), "missing": missing, "sites": len(all_sites), "q": q}
+
 # ---- MediaInfo(ffprobe) + 截图(ffmpeg)+ pixhost 免费图床 ----
 def _ff(name):
     """定位 ffprobe/ffmpeg:优先 /config/bin 的静态二进制,回退 PATH"""
@@ -3288,6 +3321,10 @@ class Handler(BaseHTTPRequestHandler):
             s._dashboard(); return
         if s.path.startswith("/api/ks/"):
             s._ks(); return
+        if s.path.startswith("/api/gapverify"):
+            from urllib.parse import urlparse, parse_qs
+            q_ = parse_qs(urlparse(s.path).query)
+            s._send_json(gap_verify((q_.get("hash", [""])[0]).strip())); return
         if s.path.startswith("/api/gap"):
             s._send_json(gap_report()); return
         if s.path.startswith("/api/xfershot"):
