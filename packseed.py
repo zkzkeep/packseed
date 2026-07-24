@@ -1658,6 +1658,15 @@ a{color:var(--accL);text-decoration:none}
 .wall:hover .pcard{opacity:.82}
 .wall .pcard:hover{opacity:1;transform:translateY(-5px) scale(1.045);z-index:2;position:relative}
 .pcard.sel .pw,.pcard.sel .ph{box-shadow:0 0 0 3px #fff,0 12px 32px rgba(0,10,60,.6)}
+.ownbadge{position:absolute;left:7px;top:7px;background:rgba(61,220,132,.94);color:#00351a;font-size:11px;font-weight:800;
+border-radius:980px;padding:3px 9px;box-shadow:0 4px 14px rgba(0,10,60,.45);letter-spacing:.02em}
+.pcard.owned .pw,.pcard.owned .ph{outline:2px solid rgba(61,220,132,.75);outline-offset:-2px}
+.libbar{display:flex;gap:10px;align-items:center;padding:4px 20px 12px;flex-wrap:wrap}
+.libbar input{flex:1;min-width:180px;background:rgba(255,255,255,.14);border:none;color:#fff;border-radius:12px;padding:10px 15px;font-size:13.5px;outline:none}
+.libbar input:focus{box-shadow:0 0 0 2.5px rgba(255,255,255,.5)}
+.libbar input::placeholder{color:rgba(255,255,255,.62)}
+.rcard.dim{opacity:.16}
+.rcard.hit .rbob{outline:2px solid var(--pop);outline-offset:3px;border-radius:12px}
 .pcard .pw{width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:12px;background:var(--card2);display:block;transition:.22s;box-shadow:0 6px 18px rgba(0,10,60,.45)}
 .pcard:hover .pw{box-shadow:0 14px 36px rgba(0,10,60,.65)}
 .pcard .ph{width:100%;aspect-ratio:2/3;border-radius:12px;background:var(--card2);display:flex;align-items:center;justify-content:center;font-size:36px}
@@ -1801,7 +1810,9 @@ select.ksin option{color:#00206e}
 <div id=im-ov onclick="this.classList.remove('show')"><div id=im-box onclick="event.stopPropagation()"><img id=im-img><div><div id=im-t></div><div id=im-p></div><a id=im-a target=_blank>在 Emby 中打开 →</a></div></div></div>
 </div>
 <div id=tab-media class=tab>
-<div class=card><h2>📥 整理入库 <span class=mut style=font-weight:400>· 下载完成自动识别→硬链接进 Emby 媒体库 · 按分类陈列 · 待确认的可手动填 TMDB id/片名</span></h2>{{MEDIA}}</div>
+<div class=card><h2>📥 整理入库 <span class=mut style=font-weight:400>· 下载完成自动识别→硬链接进 Emby 媒体库 · 按分类陈列 · 待确认的可手动填 TMDB id/片名</span></h2>
+<div class=libbar><input id=libq placeholder="🔍 查查库里有没有 —— 输片名,下载前先确认别重复" oninput="libFind()">
+<span class=mut id=libmsg>共 {{MEDIACOUNT}} 项</span></div>{{MEDIA}}</div>
 </div>
 <div id=tab-seed class=tab>
 <div class=stats>
@@ -2136,6 +2147,23 @@ function riverify(flow,speed){          // 让一条海报河流动起来(克隆
 }
 riverify(document.querySelector('.rflow'),0.4);
 for(var mi=0;mi<6;mi++){riverify(document.getElementById('mflow'+mi),0.32);}  // 每个分类一条河
+var _libTot='共 {{MEDIACOUNT}} 项';
+function libFind(){
+ var q=document.getElementById('libq').value.trim().toLowerCase();
+ var msg=document.getElementById('libmsg'),hit=0,tot=0;
+ document.querySelectorAll('#tab-media .rcard').forEach(function(c){
+  tot++;
+  var nm=(c.querySelector('.rname')||{}).textContent||'';
+  var t=(c.getAttribute('title')||'')+' '+nm;
+  var ok=!q||t.toLowerCase().indexOf(q)>=0;
+  c.classList.toggle('dim',!!q&&!ok);
+  c.classList.toggle('hit',!!q&&ok);
+  if(q&&ok)hit++;
+ });
+ if(!q){msg.textContent=_libTot;msg.style.color='';return;}
+ msg.textContent=hit?'✅ 库里已经有了,别重复下':'❌ 库里没有,可以放心下';
+ msg.style.color=hit?'#7dffb0':'var(--pop)';
+}
 function mToggle(i,btn){
  var fl=document.getElementById('mflow'+i),gd=document.getElementById('mgrid'+i);
  if(!fl||!gd)return;
@@ -2275,9 +2303,13 @@ function renderWall(){
  var CN={movie:'电影',tv:'剧集',anime:'动漫',music:'音乐'};
  gs.forEach(function(g){
   var card=document.createElement('div');card.className='pcard';
-  if(g.posterurl){var im=document.createElement('img');im.className='pw';im.loading='lazy';im.src=g.posterurl;card.appendChild(im);}
-  else if(g.poster){var im=document.createElement('img');im.className='pw';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(g.poster);card.appendChild(im);}
-  else{var ph=document.createElement('div');ph.className='ph';ph.textContent=g.cat=='music'?'🎵':(g.cat=='anime'?'🎌':(g.mtype=='tv'?'📺':'🎬'));card.appendChild(ph);}
+  if(g.owned)card.classList.add('owned');
+  var pwrap=document.createElement('div');pwrap.style.position='relative';
+  if(g.posterurl){var im=document.createElement('img');im.className='pw';im.loading='lazy';im.src=g.posterurl;pwrap.appendChild(im);}
+  else if(g.poster){var im=document.createElement('img');im.className='pw';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(g.poster);pwrap.appendChild(im);}
+  else{var ph=document.createElement('div');ph.className='ph';ph.textContent=g.cat=='music'?'🎵':(g.cat=='anime'?'🎌':(g.mtype=='tv'?'📺':'🎬'));pwrap.appendChild(ph);}
+  if(g.owned){var ob=document.createElement('div');ob.className='ownbadge';ob.textContent='✓ '+g.owned;pwrap.appendChild(ob);}
+  card.appendChild(pwrap);
   var nm=document.createElement('div');nm.className='pname';nm.textContent=g.name+(g.year?' ('+g.year+')':'');card.appendChild(nm);
   var mt=document.createElement('div');mt.className='pmeta';mt.textContent=(CN[g.cat]||CN[g.mtype])+' · '+g.results.length+' 个种 · 最高做种 '+(g.results[0]?g.results[0].seeders:0);card.appendChild(mt);
   card.title=g.overview||'';
@@ -2454,6 +2486,24 @@ def music_match(cleaned):
     _MUSIC_CACHE[cleaned] = (m, time.time())
     return m
 
+_LIBIX = {"t": 0, "d": None}
+def library_index():
+    """本地媒体库索引(缓存60秒):tmdbid→已入库标注、片名集合。用来给搜索结果打「已有」防重复下载"""
+    if _LIBIX["d"] and time.time() - _LIBIX["t"] < 60:
+        return _LIBIX["d"]
+    ids = {}; names = set()
+    try:
+        c = db()
+        for tid, tn, yr, cat in c.execute(
+                "SELECT tmdbid,tmdb_name,year,cat FROM media WHERE status='done'").fetchall():
+            if tn: names.add(tn)
+            if tid: ids[int(tid)] = f"已入库{('·'+cat) if cat else ''}"
+        c.close()
+    except Exception: pass
+    d = {"ids": ids, "names": names}
+    _LIBIX.update(t=time.time(), d=d)
+    return d
+
 def search_group(q, results, log=lambda m: None):
     """Prowlarr 结果 → 做种过滤 + TMDB 识别分组。log 回调用于搜索过程直播。"""
     def catlab(r):
@@ -2520,6 +2570,7 @@ def search_group(q, results, log=lambda m: None):
             log(f"🔎 识别 {idx+1}/{len(todo)}: {info['rep'][:36]} → {m['tmdb_name']} ({m['year']})")
         else:
             log(f"🧩 识别 {idx+1}/{len(todo)}: {info['rep'][:36]} → 未识别,归入其他")
+    owned = library_index()
     groups = {}; other = []
     for x in out:
         m = matched.get(x.pop("k"))
@@ -2528,6 +2579,7 @@ def search_group(q, results, log=lambda m: None):
             g = groups.setdefault(gk, {"name": m["tmdb_name"], "year": m["year"], "mtype": m["mtype"],
                                        "cat": "anime" if m.get("anime") else m["mtype"],
                                        "poster": m.get("poster",""), "overview": (m.get("overview") or "")[:110],
+                                       "owned": owned["ids"].get(m["id"]) or ("" if m["tmdb_name"] not in owned["names"] else "同名已有"),
                                        "results": []})
             g["results"].append(x)
         else:
@@ -3074,7 +3126,7 @@ class Handler(BaseHTTPRequestHandler):
                 ico = {"音乐":"🎵","漫画/书":"📖"}.get(cat, "🎬")
                 thumb = f"<div class='rph mtile'>{ico}</div>"
             mt = mty or ("tv" if cat in ("电视剧", "动漫") else "movie")
-            return (f"<div class=rcard data-mt='{esc(mt)}' data-tid='{tid or 0}'><div class=rbob>{thumb}"
+            return (f"<div class=rcard title='{esc(nm)}' data-mt='{esc(mt)}' data-tid='{tid or 0}'><div class=rbob>{thumb}"
                     f"<div class=rname>{esc(title)}</div><div class=ryear>{esc(yr or '')}</div></div></div>")
         media_rows = ""
         if pend:
@@ -3114,6 +3166,7 @@ class Handler(BaseHTTPRequestHandler):
                     .replace("{{TOTAL}}", str(t_total)).replace("{{INJECT}}", str(t_inject))
                     .replace("{{DONE}}", str(t_done)).replace("{{NOMATCH}}", str(t_nomatch))
                     .replace("{{ROWS}}", rows or "<tr><td colspan=6 class=mut>暂无记录，等待首次扫描…</td></tr>")
+                    .replace("{{MEDIACOUNT}}", str(sum(len(v) for v in buckets.values())))
                     .replace("{{MEDIA}}", media_rows or "<div class=mut style='padding:4px 20px 16px'>暂无入库记录</div>")
                     .replace("{{RECENT}}", recent or "<div class=mut style='padding:4px 0 8px'>还没有带海报的入库记录,下一部片就有了</div>")
                     .replace("{{EMBYPUB}}", os.environ.get("EMBY_PUBLIC", "https://emby.leesy.cc"))
