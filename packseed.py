@@ -542,11 +542,71 @@ def _chat_undo():
     except Exception as e:
         notify("❌ 撤回失败", str(e)[:50])
 
+def _chat_progress():
+    try: dl = [t for t in QB().torrents() if t.get("progress", 0) < 1]
+    except Exception as e: notify("❌ 连不上 qb", str(e)[:40]); return
+    if not dl: notify("📭 当前没有下载任务", "下载完的已自动入库+转种"); return
+    lines = [f"{round(t.get('progress',0)*100)}% · {t['name'][:26]} · {human_size(t.get('dlspeed',0))}/s"
+             for t in sorted(dl, key=lambda x: -x.get("progress", 0))[:8]]
+    notify(f"⬇️ 下载中 {len(dl)} 个", "\n".join(lines))
+
+def _chat_stats():
+    body = []
+    try:
+        st = TR().call("session-stats", {}).get("arguments", {})
+        cur = st.get("current-stats", {}); cum = st.get("cumulative-stats", {})
+        body.append(f"做种 {st.get('torrentCount',0)} 个 · 活跃 {st.get('activeTorrentCount',0)}")
+        body.append(f"本次上传 {human_size(cur.get('uploadedBytes',0))} · 累计 {human_size(cum.get('uploadedBytes',0))}")
+    except Exception: body.append("tr 读取失败")
+    try:
+        du = shutil.disk_usage("/data")
+        body.append(f"磁盘剩余 {human_size(du.free)} / {human_size(du.total)}")
+    except Exception: pass
+    notify("📊 保种状态", "\n".join(body))
+
+def _chat_holds():
+    c = db(); rows = c.execute("SELECT info_hash,name FROM media WHERE status='hold' ORDER BY ts DESC LIMIT 9").fetchall(); c.close()
+    if not rows: notify("✅ 没有待确认的条目", "识别不准的才会进这里"); return
+    _CHAT["holds"] = [r[0] for r in rows]; _CHAT["holds_ts"] = time.time()
+    lines = [f"{i+1}. {r[1][:32]}" for i, r in enumerate(rows)]
+    notify(f"⚠️ 待确认 {len(rows)} 个", "\n".join(lines) + "\n\n回复「确认N 内容」入库\n如: 确认1 12345(TMDB id)或 确认1 大明王朝")
+
+def _chat_confirm(text):
+    m = re.match(r'^确认\s*(\d+)[\s:：]+(.+)$', text)
+    if not m: notify("格式: 确认N 内容", "如 确认1 12345 或 确认1 大明王朝"); return
+    idx = int(m.group(1)); q = m.group(2).strip()
+    holds = _CHAT.get("holds") or []
+    if not (1 <= idx <= len(holds)) or time.time() - _CHAT.get("holds_ts", 0) > 900:
+        notify("❓ 序号无效或列表已过期", "先发「待确认」刷新一下"); return
+    r = manual_organize(holds[idx-1], q)
+    if r.get("ok"): notify(f"✅ 已入库 · {r.get('name','')}", f"{r.get('n',0)} 个文件已硬链接进库")
+    else: notify("❌ 入库失败", r.get("err", ""))
+
+def _chat_recent():
+    c = db(); rows = c.execute("SELECT tmdb_name,year,cat FROM media WHERE status='done' AND tmdb_name!='' ORDER BY ts DESC LIMIT 6").fetchall(); c.close()
+    if not rows: notify("📭 还没有入库记录", ""); return
+    cmap = {"电影": "🎬", "电视剧": "📺", "动漫": "🎌", "音乐": "🎵"}
+    lines = [f"{cmap.get(r[2],'')} {r[0]}{(' ('+r[1]+')') if r[1] else ''}" for r in rows]
+    notify("🎬 最近入库", "\n".join(lines))
+
 def wecom_on_text(text):
     text = (text or "").strip()
     if not text: return
     if text in ("撤回", "取消下载"):
         _chat_undo(); return
+    if text in ("进度", "下载", "下载进度"):
+        _chat_progress(); return
+    if text in ("统计", "上传", "状态", "保种"):
+        _chat_stats(); return
+    if text in ("待确认", "确认列表", "待入库"):
+        _chat_holds(); return
+    if text.startswith("确认"):
+        _chat_confirm(text); return
+    if text in ("最近", "最近入库", "最近入的"):
+        _chat_recent(); return
+    if text in ("帮助", "help", "?", "？", "菜单"):
+        notify("🌊 观澜微信指令",
+               "片名 → 搜索点播\n进度 → 看下载进度\n统计 → 保种/上传/磁盘\n待确认 → 列出待入库\n确认N 内容 → 确认入库\n最近 → 最近入库\n撤回 → 撤回上次下载"); return
     if text == "0":
         if _CHAT.get("stage") == "torrents":
             _chat_send_groups()          # 返回片单
@@ -1833,7 +1893,7 @@ select.ksin option{color:#00206e}
 <div class=stat><div class=n>{{DONE}}</div><div class=l>有匹配的种子</div></div>
 <div class=stat><div class="n mut">{{NOMATCH}}</div><div class=l>无匹配</div></div>
 </div>
-<div class=card><h2>辅种记录 <span class=mut style=font-weight:400>· 每 {{INTERVAL}}s 扫描 · 点种子名看来源和去向 · 辅不上可手动关键词重搜</span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>在辅站数</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
+<div class=card><h2>辅种记录 <span class=mut style=font-weight:400>· 每 {{INTERVAL}}s 扫描 · 点种子名看来源和去向</span> <button class=dlbtn style="padding:5px 16px;font-size:12px" onclick="researchAll(this)">🔁 重搜全部无匹配({{NOMATCH}})</button> <span class=mut id=raMsg style=font-size:12px></span></h2><table><tr><th>种子</th><th>来源</th><th>搜索词</th><th class=r>在辅站数</th><th>状态</th><th>手动辅种</th></tr>{{ROWS}}</table></div>
 </div>
 <div id=tab-health class=tab>
 <div class=stats id=hstat>
@@ -1880,7 +1940,7 @@ select.ksin option{color:#00206e}
 </div>
 <div id=ks-list style="padding:0 20px 16px"><span class=mut>选个站点开拉。空关键词=按站内最新排列。</span></div>
 </div>
-<div class=card><h2>📦 保种任务 <span class=mut style=font-weight:400>· 队列逐个下载推 qb · <button class=dlbtn style="padding:4px 14px;font-size:12px;background:rgba(255,255,255,.2);color:#fff" onclick="ksStop()">⏹ 停止并清空队列</button></span></h2>
+<div class=card><h2>📦 保种任务 <span class=mut style=font-weight:400>· 队列逐个下载推 qb · <button class=dlbtn style="padding:4px 12px;font-size:12px;background:rgba(255,255,255,.2);color:#fff" onclick="ksStop()">⏹ 停止清空</button> <button class=dlbtn style="padding:4px 12px;font-size:12px" onclick="ksRetry(this)">♻️ 重试失败</button> <button class=dlbtn style="padding:4px 12px;font-size:12px;background:rgba(255,255,255,.2);color:#fff" onclick="ksClear(this)">🗑 清历史记录</button></span></h2>
 <div id=ks-stat style="padding:0 20px 16px"><span class=mut>暂无任务</span></div></div>
 <div class=card><h2>🧭 缺种报告 <span class=mut style=font-weight:400>· 缺种列基于「观澜辅到了哪些站」反推,会把没辅到但站上其实有的误报为缺 · 发种前点「🔍 核实」对这部剧真去全站搜一遍,拿准确名单 · 带禁转标记的资料包直接拦</span> <button class=dlbtn style="padding:5px 16px;font-size:12px" onclick="gapLoad(this)">刷新</button></h2>
 <div id=gap style="padding:0 20px 16px"><span class=mut>点「刷新」生成(要请求 Prowlarr,几秒钟)</span></div></div>
@@ -2104,6 +2164,28 @@ function ksPush(btn){
  .catch(function(){btn.disabled=false;toast('失败');});
 }
 function ksStop(){fetch('/api/ks/stop').then(r=>r.json()).then(()=>{toast('已停止,队列清空');ksStatus();});}
+function ksRetry(btn){btn.disabled=true;
+ fetch('/api/ks/retry').then(r=>r.json()).then(function(d){btn.disabled=false;
+  toast(d.n?('已重排 '+d.n+' 个失败项,后台重下'):'没有失败项');ksStatus();});}
+function ksClear(btn){
+ if(!confirm('清除保种任务里已完成/已转tr/失败/跳过的历史记录?(不影响正在做种的种子)'))return;
+ btn.disabled=true;
+ fetch('/api/ks/clear?what=all').then(r=>r.json()).then(function(d){btn.disabled=false;
+  toast('已清 '+d.n+' 条历史');ksStatus();});}
+function researchAll(btn){
+ if(!confirm('对所有「无匹配」的种子重新全站搜一遍?后台逐个跑(每个约40秒,有节流),耗时较长。'))return;
+ btn.disabled=true;
+ fetch('/api/researchall').then(r=>r.json()).then(function(){
+  btn.disabled=false;document.getElementById('raMsg').textContent='🔁 已在后台重搜,完成后刷新页面看结果';
+  toast('批量重搜已启动');});}
+function skipOne(h,btn){btn.disabled=true;
+ fetch('/api/skip?hash='+encodeURIComponent(h)).then(r=>r.json()).then(function(d){
+  if(d.ok){var c=btn.closest('.dcard');if(c)c.style.display='none';toast('已跳过');}
+  else{btn.disabled=false;toast('失败');}});}
+function skipAll(btn){
+ if(!confirm('把所有「待确认」的条目标记为跳过?(不入库,以后不再提示)'))return;
+ btn.disabled=true;
+ fetch('/api/skipall').then(r=>r.json()).then(function(d){toast('已跳过 '+d.n+' 个');location.reload();});}
 function ksAuto(btn){
  var ix=document.getElementById('ks-ix').value;
  var tgt=parseFloat(document.getElementById('ks-tgt').value)||0;
@@ -2992,6 +3074,22 @@ def gap_report():
     rows.sort(key=lambda x: len(x["missing"]))
     return {"ok": True, "sites": len(all_sites), "rows": rows}
 
+_BATCH = {"research": False, "msg": ""}
+def research_all_worker():
+    _BATCH["research"] = True
+    try:
+        c = db(); rows = c.execute("SELECT info_hash,query,name,size FROM torrents WHERE status='no_match' GROUP BY name,size").fetchall(); c.close()
+        logmsg("INFO", f"🔁 批量重搜 {len(rows)} 个无匹配内容…")
+        for i, (ih, q, name, _sz) in enumerate(rows):
+            _BATCH["msg"] = f"重搜中 {i+1}/{len(rows)}: {name[:24]}"
+            try: manual_research(ih, q or extract_query(name) or name)
+            except Exception as e: logmsg("WARN", f"重搜失败 {name[:24]}: {str(e)[:30]}")
+            time.sleep(3)   # 节流,别打爆站
+        _BATCH["msg"] = f"✅ 批量重搜完成({len(rows)} 个)"
+        logmsg("INFO", "批量重搜完成")
+    finally:
+        _BATCH["research"] = False
+
 _HEALTH_CACHE = {"ts": 0, "d": None}
 def health_report(force=False):
     """做种健康体检:tracker掉线(白做)、0-peer冷种、tr错误种子。缓存5分钟(遍历几千种较重)"""
@@ -3409,6 +3507,18 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             force = parse_qs(urlparse(s.path).query).get("force") == ["1"]
             s._send_json(health_report(force)); return
+        if s.path.startswith("/api/researchall"):
+            if not _BATCH["research"]:
+                threading.Thread(target=research_all_worker, daemon=True).start()
+            s._send_json({"ok": True, "running": True}); return
+        if s.path.startswith("/api/skipall"):
+            c = db(); n = c.execute("UPDATE media SET status='skip' WHERE status='hold'").rowcount; c.commit(); c.close()
+            s._send_json({"ok": True, "n": n}); return
+        if s.path.startswith("/api/skip"):
+            from urllib.parse import urlparse, parse_qs
+            h = (parse_qs(urlparse(s.path).query).get("hash", [""])[0]).strip()
+            c = db(); n = c.execute("UPDATE media SET status='skip' WHERE info_hash=? AND status='hold'", (h,)).rowcount; c.commit(); c.close()
+            s._send_json({"ok": bool(n)}); return
         if s.path.startswith("/api/gapverify"):
             from urllib.parse import urlparse, parse_qs
             q_ = parse_qs(urlparse(s.path).query)
@@ -3476,15 +3586,21 @@ class Handler(BaseHTTPRequestHandler):
                     f"<div class=rname>{esc(title)}</div><div class=ryear>{esc(yr or '')}</div></div></div>")
         media_rows = ""
         if pend:
-            media_rows += "<div class=sgrp style='padding:0 20px'>⚠️ 待确认 / 处理中 <span class=mut style=font-weight:400>· 填 TMDB id 或片名一键入库</span></div><div class=dgrid>"
+            nhold = sum(1 for r in pend if r[5] == "hold")
+            skipall = (f" <button class=dlbtn style='padding:4px 12px;font-size:12px;background:rgba(255,255,255,.2);color:#fff' "
+                       f"onclick='skipAll(this)'>🚫 全部跳过({nhold})</button>") if nhold else ""
+            media_rows += ("<div class=sgrp style='padding:0 20px'>⚠️ 待确认 / 处理中 "
+                           "<span class=mut style=font-weight:400>· 填 TMDB id 或片名一键入库,不想要的直接跳过</span>" + skipall + "</div><div class=dgrid>")
             for r in pend:
                 ih,nm,cat,tn,yr,stt,tgt,pos,tid,mty = r
                 lbl, cls = smap.get(stt, (stt, "err"))
-                media_rows += (f"<div class=dcard><div class=dwrap><div class='dph mtile'>❓</div>"
+                skipbtn = (f"<button onclick=\"skipOne('{esc(ih)}',this)\" style='background:rgba(255,255,255,.16);color:#fff'>跳过</button>"
+                           if stt == "hold" else "")
+                media_rows += (f"<div class=dcard data-h='{esc(ih)}'><div class=dwrap><div class='dph mtile'>❓</div>"
                                f"<div class=mbadge><span class='b {cls}'>{esc(lbl)}</span></div></div>"
                                f"<div class=dtt title='{esc(nm)}'>{esc(nm)}</div>"
                                f"<div class=rs style='margin-top:6px'><input placeholder='TMDB id 或 片名' value=''>"
-                               f"<button onclick=\"reid('{esc(ih)}',this)\">确认</button></div></div>")
+                               f"<button onclick=\"reid('{esc(ih)}',this)\">确认</button>{skipbtn}</div></div>")
             media_rows += "</div>"
         for ci, (cname, icon) in enumerate(CATS):
             items = buckets.get(cname) or []
@@ -3886,6 +4002,18 @@ class Handler(BaseHTTPRequestHandler):
             _KS["stop"] = True; _KSF["stop"] = True
             c = db(); c.execute("UPDATE keepseed SET status='skip' WHERE status='queued'"); c.commit(); c.close()
             s._send_json({"ok": True}); return
+        if act == "retry":     # 批量重试:失败项重新排队
+            c = db(); n = c.execute("UPDATE keepseed SET status='queued', err='' WHERE status='error'").rowcount
+            c.commit(); c.close()
+            if n and not _KS["running"]:
+                threading.Thread(target=keepseed_worker, daemon=True).start()
+            s._send_json({"ok": True, "n": n}); return
+        if act == "clear":     # 批量清理历史记录: what=done|error|skip|all
+            what = q_.get("what", ["done"])[0]
+            sql = {"done": "status='done'", "error": "status='error'", "skip": "status='skip'",
+                   "all": "status IN ('done','error','skip')"}.get(what, "status='done'")
+            c = db(); n = c.execute("DELETE FROM keepseed WHERE " + sql).rowcount; c.commit(); c.close()
+            s._send_json({"ok": True, "n": n}); return
         if act == "auto":
             if _KSF["running"]:
                 s._send_json({"ok": False, "err": "自动拉取已在跑"}); return
