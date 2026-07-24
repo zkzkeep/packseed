@@ -1842,6 +1842,23 @@ select.ksin option{color:#00206e}
 #xf-box{width:min(680px,92vw);max-height:86vh;overflow-y:auto;background:rgba(255,255,255,.16);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,.3);border-radius:22px;padding:24px;box-shadow:0 30px 80px rgba(0,10,60,.6)}
 .xfl{display:block;font-size:12px;font-weight:700;margin:12px 0 4px;color:rgba(255,255,255,.85)}
 .xfta{width:100%;background:rgba(0,20,90,.35);border:1px solid rgba(255,255,255,.22);color:#fff;border-radius:10px;padding:9px 12px;font-size:12.5px;line-height:1.6;outline:none;resize:vertical;font-family:ui-monospace,Menlo,monospace}
+/* 折叠面板(次要功能收起,不挤主流程) */
+.acc{margin:6px 20px;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.acchead{padding:11px 16px;font-size:13px;font-weight:800;cursor:pointer;display:flex;align-items:center;gap:8px;user-select:none;background:rgba(255,255,255,.06);transition:.15s}
+.acchead:hover{background:rgba(255,255,255,.11)}
+.acchead::before{content:'▸';transition:.2s;color:var(--sub);font-size:12px}
+.acc.open .acchead::before{transform:rotate(90deg)}
+.accbody{display:none;padding:12px 16px 14px}
+.acc.open .accbody{display:block}
+/* 统一次要按钮:半透明白边 ghost 风格 */
+.btn-ghost{background:rgba(255,255,255,.18)!important;color:#fff!important}
+/* 空状态引导 */
+.empty{text-align:center;padding:34px 20px;color:var(--sub)}
+.empty .ei{font-size:38px;opacity:.6;margin-bottom:8px}
+.empty .et{font-size:15px;font-weight:700;color:#fff;margin-bottom:4px}
+/* 错误卡片:醒目+可重试 */
+.errbox{margin:6px 20px 14px;padding:16px 18px;border-radius:14px;background:rgba(255,90,80,.14);border:1px solid rgba(255,90,80,.4);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.errbox .eic{font-size:26px}
 /* 键盘可访问性:所有可点元素给焦点轮廓 */
 button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2.5px solid var(--pop);outline-offset:2px}
 /* 动画降级:系统开了"减少动态效果"就停掉海报河/漂浮/波浪 */
@@ -1952,23 +1969,26 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 <button class=dlbtn style="padding:8px 24px;background:var(--pop);color:#00206e" onclick="ksAuto(this)">🚀 开始自动保种</button>
 <span class=mut>就这一个按钮:自动翻页拉取整站,按①的条件过滤(含🆓),已有的跳过,边拉边下,够量自动停。2T=2048</span>
 </div>
-<div style="margin:0 20px 8px;padding:12px 16px;background:rgba(255,255,255,.10);border:1px solid var(--line);border-radius:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
-<span style="font-weight:800">⚡ 抢免费守候(刷上传)</span>
+<div class=acc><div class=acchead onclick="accToggle(this)">✋ 手动挑选(想自己一个个挑就点开)</div>
+<div class=accbody>
+<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px;margin-bottom:8px">
+<button class=dlbtn style="padding:7px 16px" onclick="ksFetch(false,this)">拉取列表</button>
+<button class="dlbtn btn-ghost" style="padding:7px 14px" onclick="ksFetch(true,this)">翻下一页</button>
+<span class=mut>→ 下面勾选 →</span>
+<button class="dlbtn btn-ghost" style="padding:7px 14px" onclick="ksAll()">全选</button>
+<button class=dlbtn style="padding:7px 18px;background:var(--pop);color:#00206e" onclick="ksPush(this)">⬇️ 推送选中</button>
+</div>
+<div id=ks-list><span class=mut>选个站点开拉。空关键词=按站内最新排列。</span></div>
+</div></div>
+<div class=acc><div class=acchead onclick="accToggle(this)">⚡ 抢免费守候(刷上传,想开就点开)</div>
+<div class=accbody>
+<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
 <span class=mut>定时盯①选的站,新出的🆓免费种自动抢下做种回吐上传</span>
 <button class=dlbtn id=fw-btn style="padding:7px 20px" onclick="fwToggle(this)">开启守候</button>
 <span class=mut id=fw-stat></span>
+</div></div></div>
 </div>
-<div style="padding:2px 20px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
-<span style="font-weight:800">② ✋ 或手动挑选</span>
-<button class=dlbtn style="padding:7px 16px" onclick="ksFetch(false,this)">拉取列表</button>
-<button class=dlbtn style="padding:7px 14px;background:rgba(255,255,255,.2);color:#fff" onclick="ksFetch(true,this)">翻下一页</button>
-<span class=mut>→ 下面勾选 →</span>
-<button class=dlbtn style="padding:7px 14px;background:rgba(255,255,255,.2);color:#fff" onclick="ksAll()">全选</button>
-<button class=dlbtn style="padding:7px 18px;background:var(--pop);color:#00206e" onclick="ksPush(this)">⬇️ 推送选中</button>
-</div>
-<div id=ks-list style="padding:0 20px 16px"><span class=mut>选个站点开拉。空关键词=按站内最新排列。</span></div>
-</div>
-<div class=card><h2>📦 保种任务 <span class=mut style=font-weight:400>· 队列逐个下载推 qb · <button class=dlbtn style="padding:4px 12px;font-size:12px;background:rgba(255,255,255,.2);color:#fff" onclick="ksStop()">⏹ 停止清空</button> <button class=dlbtn style="padding:4px 12px;font-size:12px" onclick="ksRetry(this)">♻️ 重试失败</button> <button class=dlbtn style="padding:4px 12px;font-size:12px;background:rgba(255,255,255,.2);color:#fff" onclick="ksClear(this)">🗑 清历史记录</button></span></h2>
+<div class=card><h2>📦 保种任务 <span class=mut style=font-weight:400>· 队列逐个下载推 qb · <button class="dlbtn btn-ghost" style="padding:4px 12px;font-size:12px" onclick="ksStop()">⏹ 停止清空</button> <button class=dlbtn style="padding:4px 12px;font-size:12px" onclick="ksRetry(this)">♻️ 重试失败</button> <button class="dlbtn btn-ghost" style="padding:4px 12px;font-size:12px" onclick="ksClear(this)">🗑 清历史记录</button></span></h2>
 <div id=ks-stat style="padding:0 20px 16px"><span class=mut>暂无任务</span></div></div>
 <div class=card><h2>🧭 缺种报告 <span class=mut style=font-weight:400>· 缺种列基于「观澜辅到了哪些站」反推,会把没辅到但站上其实有的误报为缺 · 发种前点「🔍 核实」对这部剧真去全站搜一遍,拿准确名单 · 带禁转标记的资料包直接拦</span> <button class=dlbtn style="padding:5px 16px;font-size:12px" onclick="gapLoad(this)">刷新</button></h2>
 <div id=gap style="padding:0 20px 16px"><span class=mut>点「刷新」生成(要请求 Prowlarr,几秒钟)</span></div></div>
@@ -2003,7 +2023,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 <div id=setform style="padding:4px 20px 16px"><span class=mut>加载中…</span></div>
 <div style="padding:0 20px 20px;display:flex;gap:12px;align-items:center">
 <button class=dlbtn style="padding:11px 34px;font-size:14px" onclick="saveSettings(this)">💾 保存全部</button>
-<button class=dlbtn style="padding:11px 26px;font-size:14px;background:rgba(255,255,255,.2);color:#fff" onclick="testAll(this)">🔌 测试全部连接</button>
+<button class="dlbtn btn-ghost" style="padding:11px 26px;font-size:14px" onclick="testAll(this)">🔌 测试全部连接</button>
 <span id=set-msg class=mut></span>
 </div>
 <div id=testout style="padding:0 20px 16px;font-size:13px;line-height:2"></div>
@@ -2088,8 +2108,8 @@ function pollDl(){
  fetch('/api/downloads').then(r=>r.json()).then(function(d){
   var el=document.getElementById('dlist');if(!el)return;
   var dl=d.dl||[];
-  if(d.err){el.className='';el.innerHTML='<span class=mut>qb 连接失败：'+d.err+'</span>';}
-  else if(!dl.length){el.className='';el.innerHTML='<span class=mut>qb 里暂无任务 —— 下载完成的会自动入库+转种到 tr,见下方记录</span>';}
+  if(d.err){el.className='';el.innerHTML='<div class=errbox><span class=eic>🔌</span><div style="flex:1;min-width:180px"><div style="font-weight:800">连不上 qBittorrent</div><div class=mut style="font-size:12.5px">'+d.err+' · 检查 qb 是否在跑、设置里地址/凭据是否对</div></div><button class=dlbtn onclick="gotoSetup()">去设置</button> <button class="dlbtn btn-ghost" onclick="pollDl()">重试</button></div>';}
+  else if(!dl.length){el.className='';el.innerHTML='<div class=empty><div class=ei>🌊</div><div class=et>当前没有下载任务</div><div>去「搜索」找片下载,下载完会自动入库+转种到 tr</div></div>';}
   else{
    el.innerHTML='';el.className='dgrid';
    dl.forEach(function(t){
@@ -2202,6 +2222,8 @@ function ksPush(btn){
  .then(r=>r.json()).then(function(d){btn.disabled=false;toast(d.ok?('已入队 '+d.n+' 个,后台逐个拉取'):'失败');ksStatus();})
  .catch(function(){btn.disabled=false;toast('失败');});
 }
+function accToggle(el){el.parentNode.classList.toggle('open');}
+function gotoSetup(){location.hash='#setup';}
 function ksStop(){fetch('/api/ks/stop').then(r=>r.json()).then(()=>{toast('已停止,队列清空');ksStatus();});}
 function ksRetry(btn){btn.disabled=true;
  fetch('/api/ks/retry').then(r=>r.json()).then(function(d){btn.disabled=false;
@@ -2629,7 +2651,7 @@ function pollJob(id,box,t0){
   }
   var d=j.result||{};
   if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">搜索失败：'+(d.err||'')+'</div>';return;}
-  if(!(d.groups||[]).length&&!(d.other||[]).length){box.innerHTML='<div class=mut style="padding:10px 16px">没搜到结果，换个关键词试试</div>';return;}
+  if(!(d.groups||[]).length&&!(d.other||[]).length){box.innerHTML='<div class=empty><div class=ei>🔍</div><div class=et>没搜到结果</div><div>试试英文片名 · 换个更短的关键词 · 或去设置检查 Prowlarr 连接</div></div>';return;}
   _sd=d;renderWall();
  }).catch(function(){setTimeout(function(){pollJob(id,box,t0);},2500);});
 }
@@ -3666,14 +3688,14 @@ class Handler(BaseHTTPRequestHandler):
         html = (PAGE.replace("{{INTERVAL}}", str(CFG["SCAN_INTERVAL"]))
                     .replace("{{TOTAL}}", str(t_total)).replace("{{INJECT}}", str(t_inject))
                     .replace("{{DONE}}", str(t_done)).replace("{{NOMATCH}}", str(t_nomatch))
-                    .replace("{{ROWS}}", rows or "<tr><td colspan=6 class=mut>暂无记录，等待首次扫描…</td></tr>")
+                    .replace("{{ROWS}}", rows or "<tr><td colspan=6><div class=empty><div class=ei>🌱</div><div class=et>还没有辅种记录</div><div>后台每隔一阵扫描 tr 里的种子,自动全站找同内容注入 · 有种子后这里就有了</div></div></td></tr>")
                     .replace("{{MEDIACOUNT}}", str(sum(len(v) for v in buckets.values())))
                     .replace("{{MEDIA}}", media_rows or "<div class=mut style='padding:4px 20px 16px'>暂无入库记录</div>")
                     .replace("{{RECENT}}", recent or "<div class=mut style='padding:4px 0 8px'>还没有带海报的入库记录,下一部片就有了</div>")
                     .replace("{{EMBYPUB}}", os.environ.get("EMBY_PUBLIC", "https://emby.leesy.cc"))
                     .replace("{{LOGOUT}}", ('<a href="/logout" class="tabbtn" style="float:right;color:rgba(255,255,255,.55)" '
                                             'title="退出登录">🚪 退出</a>') if CFG["AUTH_USER"] else "")
-                    .replace("{{LOGS}}", logs or "<tr><td colspan=2 class=mut>—</td></tr>"))
+                    .replace("{{LOGS}}", logs or "<tr><td colspan=2><div class=empty><div class=ei>📋</div><div class=et>还没有活动日志</div></div></td></tr>"))
         b = html.encode("utf-8")
         s.send_response(200); s.send_header("Content-Type","text/html; charset=utf-8")
         s.send_header("Cache-Control","no-cache, no-store, must-revalidate")
