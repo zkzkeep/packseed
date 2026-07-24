@@ -1668,11 +1668,22 @@ a{color:var(--accL);text-decoration:none}
 .pbar i.full{background:var(--ok)}
 .grpsec{border-top:1px solid var(--line);margin-top:6px}
 .gt{font-size:15px;font-weight:600;margin-bottom:4px;letter-spacing:-.01em}
-.dcard{display:flex;gap:16px;padding:14px 20px;border-bottom:1px solid var(--line);align-items:flex-start}
-.dcard:last-child{border-bottom:none}
-.dpos{width:58px;height:87px;object-fit:cover;border-radius:10px;background:var(--card2);flex-shrink:0;box-shadow:0 4px 12px rgba(0,10,60,.5)}
-.dph{width:58px;height:87px;border-radius:10px;background:var(--card2);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:24px}
-.dtt{font-size:14px;font-weight:600;letter-spacing:-.01em}.dtt .mut{font-weight:400;font-size:12px}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:20px;padding:6px 20px 18px}
+.dcard{position:relative}
+.dwrap{position:relative;border-radius:14px;overflow:hidden;box-shadow:0 10px 26px rgba(0,10,60,.5);background:var(--card2)}
+.dpos{width:100%;aspect-ratio:2/3;object-fit:cover;display:block}
+.dph{width:100%;aspect-ratio:2/3;display:flex;align-items:center;justify-content:center;font-size:38px;color:rgba(255,255,255,.5)}
+.dpct{position:absolute;left:0;right:0;bottom:0;padding:26px 10px 8px;font-size:19px;font-weight:800;letter-spacing:-.02em;
+background:linear-gradient(180deg,transparent,rgba(0,15,70,.86));text-shadow:0 2px 8px rgba(0,10,60,.6)}
+.dcx{position:absolute;top:7px;right:7px;background:rgba(0,15,70,.62);backdrop-filter:blur(6px);border:none;color:#fff;border-radius:980px;
+width:26px;height:26px;font-size:13px;cursor:pointer;opacity:0;transition:.18s;line-height:1;padding:0}
+.dcard:hover .dcx{opacity:1}
+.dcx:hover{background:rgba(255,90,80,.95)}
+.dfree{position:absolute;top:7px;left:7px;background:rgba(255,212,0,.92);color:#00206e;border-radius:980px;padding:2px 8px;font-size:11px;font-weight:800}
+.dtt{font-size:13.5px;font-weight:700;letter-spacing:-.01em;margin-top:9px;line-height:1.35;
+display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.dsub{font-size:11.5px;color:var(--sub);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dmeta{font-size:11.5px;color:var(--sub);margin-top:5px;line-height:1.5}
 .hero{position:relative;border-radius:22px;overflow:hidden;text-align:center;padding:36px 20px 28px;margin-bottom:20px;
 background:#0039c8;box-shadow:0 20px 54px rgba(0,10,60,.5);border:1px solid rgba(255,255,255,.18)}
 .herovid{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}
@@ -1866,35 +1877,35 @@ function pollDl(){
  fetch('/api/downloads').then(r=>r.json()).then(function(d){
   var el=document.getElementById('dlist');if(!el)return;
   var dl=d.dl||[];
-  if(d.err){el.innerHTML='<span class=mut>qb 连接失败：'+d.err+'</span>';}
-  else if(!dl.length){el.innerHTML='<span class=mut>qb 里暂无任务 —— 下载完成的会自动入库+转种到 tr,见下方记录</span>';}
+  if(d.err){el.className='';el.innerHTML='<span class=mut>qb 连接失败：'+d.err+'</span>';}
+  else if(!dl.length){el.className='';el.innerHTML='<span class=mut>qb 里暂无任务 —— 下载完成的会自动入库+转种到 tr,见下方记录</span>';}
   else{
-   el.innerHTML='';
+   el.innerHTML='';el.className='dgrid';
    dl.forEach(function(t){
-    var row=document.createElement('div');row.className='dcard';
-    if(t.poster){var im=document.createElement('img');im.className='dpos';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(t.poster);row.appendChild(im);}
-    else{var ph=document.createElement('div');ph.className='dph';ph.textContent='⬇️';row.appendChild(ph);}
-    var col=document.createElement('div');col.style.cssText='flex:1;min-width:0';
-    var tt=document.createElement('div');tt.className='dtt';
-    tt.textContent=t.tmdb?(t.tmdb+(t.year?' ('+t.year+')':'')):t.name.slice(0,50);
-    if(t.tmdb){var sm=document.createElement('span');sm.className='mut';sm.textContent='  '+t.name.slice(0,56);tt.appendChild(sm);}
-    var pb=document.createElement('div');pb.className='pbar';var pi=document.createElement('i');
-    pi.style.width=t.progress+'%';if(t.progress>=100)pi.className='full';pb.appendChild(pi);
-    var i=document.createElement('div');i.className='mut';i.style.cssText='font-size:12px;margin-top:6px';
-    i.textContent=(SM[t.state]||t.state)+' · '+t.sizeh+' · '+t.speed+(t.eta?' · 剩'+t.eta:'')+' · 做种'+t.seeds+' · '+t.progress+'%';
-    col.appendChild(tt);col.appendChild(pb);col.appendChild(i);
-    row.appendChild(col);
-    var cx=document.createElement('button');cx.className='dlbtn';cx.style.cssText='background:transparent;border:1px solid var(--line);color:var(--sub);flex-shrink:0';
-    cx.textContent='✕ 取消';
+    var card=document.createElement('div');card.className='dcard';
+    var wrap=document.createElement('div');wrap.className='dwrap';
+    if(t.poster){var im=document.createElement('img');im.className='dpos';im.loading='lazy';im.src='/api/poster?p='+encodeURIComponent(t.poster);wrap.appendChild(im);}
+    else{var ph=document.createElement('div');ph.className='dph';ph.textContent='⬇️';wrap.appendChild(ph);}
+    var pct=document.createElement('div');pct.className='dpct';pct.textContent=t.progress+'%';wrap.appendChild(pct);
+    var cx=document.createElement('button');cx.className='dcx';cx.textContent='✕';cx.title='取消下载';
     cx.onclick=function(){
      if(!confirm('取消下载「'+(t.tmdb||t.name.slice(0,30))+'」? 将从 qb 移除任务并删除已下载的数据。'))return;
-     cx.disabled=true;cx.textContent='取消中…';
+     cx.disabled=true;
      fetch('/api/canceldl?hash='+encodeURIComponent(t.hash)).then(r=>r.json()).then(function(d){
       if(d.ok){toast('已取消并清理');pollDl();}
-      else{toast('取消失败：'+(d.err||''));cx.disabled=false;cx.textContent='✕ 取消';}
-     }).catch(()=>{cx.disabled=false;cx.textContent='✕ 取消';});
+      else{toast('取消失败：'+(d.err||''));cx.disabled=false;}
+     }).catch(()=>{cx.disabled=false;});
     };
-    row.appendChild(cx);el.appendChild(row);
+    wrap.appendChild(cx);card.appendChild(wrap);
+    var tt=document.createElement('div');tt.className='dtt';
+    tt.textContent=t.tmdb?(t.tmdb+(t.year?' ('+t.year+')':'')):t.name.slice(0,50);
+    tt.title=t.name;card.appendChild(tt);
+    var pb=document.createElement('div');pb.className='pbar';var pi=document.createElement('i');
+    pi.style.width=t.progress+'%';if(t.progress>=100)pi.className='full';pb.appendChild(pi);card.appendChild(pb);
+    var i=document.createElement('div');i.className='dmeta';
+    i.textContent=(SM[t.state]||t.state)+' · '+t.sizeh+' · '+t.speed+(t.eta?' · 剩'+t.eta:'')+' · 做种'+t.seeds;
+    card.appendChild(i);
+    el.appendChild(card);
    });
   }
   var dd=document.getElementById('ddone');if(!dd)return;
