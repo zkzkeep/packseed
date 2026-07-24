@@ -1671,7 +1671,7 @@ def scanner():
 # ============ 网页仪表盘 ============
 PAGE = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>观澜 Wavegazer</title><link rel="icon" href="/favicon.ico" type="image/svg+xml"><style>
-:root{--ikb:#002FA7;--acc:#ffffff;--accL:#CFE0FF;--pop:#FFD400;--ok:#3ddc84;--warn:#ffd83d;--err:#ff8579;--fg:#fff;--sub:rgba(255,255,255,.68);--line:rgba(255,255,255,.24);--card:rgba(255,255,255,.17);--card2:rgba(255,255,255,.26)}
+:root{--ikb:#002FA7;--acc:#ffffff;--accL:#CFE0FF;--pop:#FFD400;--ok:#3ddc84;--warn:#ffd83d;--err:#ff8579;--fg:#fff;--sub:rgba(255,255,255,.78);--line:rgba(255,255,255,.24);--card:rgba(255,255,255,.17);--card2:rgba(255,255,255,.26)}
 *{box-sizing:border-box}::selection{background:rgba(255,255,255,.3)}
 body{margin:0;color:#fff;font:14px/1.55 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased;
 background:radial-gradient(1100px 520px at 85% -8%,rgba(255,255,255,.10),transparent 60%),linear-gradient(180deg,#0039c8 0%,#002FA7 38%,#001d77 100%);background-attachment:fixed;background-color:#002FA7}
@@ -1842,6 +1842,34 @@ select.ksin option{color:#00206e}
 #xf-box{width:min(680px,92vw);max-height:86vh;overflow-y:auto;background:rgba(255,255,255,.16);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,.3);border-radius:22px;padding:24px;box-shadow:0 30px 80px rgba(0,10,60,.6)}
 .xfl{display:block;font-size:12px;font-weight:700;margin:12px 0 4px;color:rgba(255,255,255,.85)}
 .xfta{width:100%;background:rgba(0,20,90,.35);border:1px solid rgba(255,255,255,.22);color:#fff;border-radius:10px;padding:9px 12px;font-size:12.5px;line-height:1.6;outline:none;resize:vertical;font-family:ui-monospace,Menlo,monospace}
+/* 键盘可访问性:所有可点元素给焦点轮廓 */
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2.5px solid var(--pop);outline-offset:2px}
+/* 动画降级:系统开了"减少动态效果"就停掉海报河/漂浮/波浪 */
+@media (prefers-reduced-motion:reduce){.rbob,.rtrack,.voyw,.voyboat,.voylamp,.herovid{animation:none!important}}
+/* ============ 移动端适配 ============ */
+@media (max-width:768px){
+ html,body{overflow-x:hidden}
+ .wrap{padding:18px 12px}
+ h1{font-size:21px}
+ .tabs{display:flex;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;border-radius:12px;scrollbar-width:none}
+ .tabs::-webkit-scrollbar{display:none}
+ .tabbtn{padding:9px 15px;white-space:nowrap;flex:0 0 auto}
+ .stats{grid-template-columns:1fr 1fr;gap:10px}
+ .card{overflow-x:auto}                       /* 超宽表格在卡片内横滚,不撑破页面 */
+ .card table{min-width:max-content}
+ .dgrid{grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:12px;padding:6px 14px 16px}
+ .wall{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:12px;padding:14px}
+ .mgrid{grid-template-columns:repeat(auto-fill,minmax(100px,1fr))}
+ .srow{grid-template-columns:1fr;gap:4px;margin:12px 0}
+ .srow label{font-size:12.5px}
+ .searchbar{flex-direction:column}
+ .searchbar input,.searchbar button{width:100%}
+ .hero{padding:24px 14px 20px}
+ .rcard{flex-basis:88px}.rcard img,.rcard .rph{width:88px}
+ #im-box{flex-direction:column;max-width:92vw;align-items:center;text-align:left}
+ #im-box img{width:130px}
+ #xf-box{width:94vw}
+}
 </style></head><body><div class=wrap>
 <h1 style="display:flex;align-items:center;gap:11px"><svg width="34" height="34" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect width="64" height="64" rx="14" fill="#0a2fb5"/><circle cx="46" cy="17" r="7.5" fill="#FFD400"/><path d="M2 37c7-9 15-9 21 0s15 9 21 0 12-8 18-3v30H2z" fill="#ffffff" opacity="0.95"/><path d="M2 47c7-7 13-7 19 0s15 7 21 0 14-7 20-1v18H2z" fill="#CFE0FF" opacity="0.9"/></svg>观澜 <span style="font-size:15px;font-weight:600;color:rgba(255,255,255,.6);letter-spacing:.04em">Wavegazer</span></h1><div class=sub>观影观澜 · 搜索 / 下载 / 刮削 / 保种 / 辅种 —— 一个人的影音港湾</div>
 <div class=tabs>
@@ -1984,7 +2012,7 @@ select.ksin option{color:#00206e}
 <div class=sub style=text-align:center>观澜 Wavegazer · 一个人的影音港湾 · MIT 开源</div>
 </div><div id=toast></div>
 <script>
-var _dlT=null;var _t=null;var _ksT=null;
+var _dlT=null;var _t=null;var _ksT=null;var _dashT=null;
 var _of=window.fetch;   // 会话过期(401)自动送回登录页,不再半死不活
 window.fetch=function(){return _of.apply(this,arguments).then(function(r){
  if(r.status==401){location.href='/login';}
@@ -1993,17 +2021,28 @@ function armReload(t){
  clearTimeout(_t);_t=null;
  if(t=='seed'||t=='media'||t=='logs')_t=setTimeout(()=>location.reload(),20000);  // 只有表格页才自动刷新
 }
+var _curTab='search';
+function startPolls(t){       // 只给当前 tab 装轮询;页面不可见时一律不装(省电省流量)
+ clearInterval(_dlT);clearInterval(_ksT);clearInterval(_dashT);
+ if(document.hidden)return;
+ _dashT=setInterval(pollDash,5000);          // 仪表盘只在页面可见时刷
+ if(t=='dl'){pollDl();_dlT=setInterval(pollDl,4000);}
+ if(t=='keep'){ksInit();_ksT=setInterval(ksStatus,3000);}
+}
 function showTab(t){
  document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
  document.querySelectorAll('.tabbtn').forEach(e=>e.classList.remove('on'));
  var el=document.getElementById('tab-'+t);(el||document.getElementById('tab-search')).classList.add('active');
  var b=document.querySelector('.tabbtn[data-t="'+(el?t:'search')+'"]');if(b)b.classList.add('on');
- clearInterval(_dlT);clearInterval(_ksT);
- armReload(el?t:'search');
- if(t=='dl'){pollDl();_dlT=setInterval(pollDl,4000);}
- if(t=='keep'){ksInit();_ksT=setInterval(ksStatus,3000);}
+ _curTab=el?t:'search';
+ armReload(_curTab);
+ startPolls(_curTab);
  if(t=='health'){healthLoad(null,0);}
 }
+document.addEventListener('visibilitychange',function(){
+ if(document.hidden){clearInterval(_dlT);clearInterval(_ksT);clearInterval(_dashT);clearTimeout(_t);}
+ else{startPolls(_curTab);armReload(_curTab);}
+});
 var _hLoaded=false;
 function healthLoad(btn,force){
  if(btn){btn.disabled=true;btn.textContent='体检中…';}
@@ -2409,7 +2448,7 @@ function pollDash(){
    document.getElementById('d-seedl').textContent='做种中 · 今日已上传 '+fmtB(d.tr.up_today);}
  }).catch(()=>{});
 }
-pollDash();setInterval(pollDash,5000);
+pollDash();   // 首屏拉一次;之后的定时刷新由 startPolls 按 tab+可见性管理
 function loadSettings(){
  fetch('/api/settings').then(r=>r.json()).then(function(d){
   var f=document.getElementById('setform');if(!f||!d.ok)return;
@@ -2616,7 +2655,7 @@ function reid(h,el){
 
 DETAIL = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>种子详情 · 观澜</title><link rel="icon" href="/favicon.ico" type="image/svg+xml"><style>
-:root{--ikb:#002FA7;--acc:#fff;--accL:#CFE0FF;--ok:#3ddc84;--warn:#ffd83d;--fg:#fff;--sub:rgba(255,255,255,.68);--line:rgba(255,255,255,.24);--card:rgba(255,255,255,.17)}
+:root{--ikb:#002FA7;--acc:#fff;--accL:#CFE0FF;--ok:#3ddc84;--warn:#ffd83d;--fg:#fff;--sub:rgba(255,255,255,.78);--line:rgba(255,255,255,.24);--card:rgba(255,255,255,.17)}
 *{box-sizing:border-box}body{margin:0;color:#fff;font:14px/1.6 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;-webkit-font-smoothing:antialiased;
 background:linear-gradient(180deg,#0039c8 0%,#002FA7 38%,#001d77 100%);background-attachment:fixed;background-color:#002FA7}
 .wrap{max-width:840px;margin:0 auto;padding:32px 28px}a{color:var(--accL);text-decoration:none}
