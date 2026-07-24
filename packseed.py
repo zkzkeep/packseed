@@ -58,6 +58,8 @@ CFG = {
     "FREE_WATCH_MIN": int(os.environ.get("FREE_WATCH_MIN", "5")),   # 守候刷新间隔(分钟)
     "FREE_MAX_GB": int(os.environ.get("FREE_MAX_GB", "30")),        # 守候单种体积上限(GB),0=不限
     "FREE_OFFICIAL": os.environ.get("FREE_OFFICIAL", "0") == "1",   # 守候只抢官种(有些站保种考核只认官种)
+    "BACKUP_KEEP":   int(os.environ.get("BACKUP_KEEP", "7")),       # 自动备份保留份数(每天备份 DB+settings)
+    "LOG_KEEP_DAYS": int(os.environ.get("LOG_KEEP_DAYS", "30")),    # 日志保留天数,定期清理防膨胀
 }
 
 # ============ 设置中心: /config/settings.json 覆盖环境变量,网页可改,热生效 ============
@@ -154,6 +156,8 @@ SETTING_GROUPS = [
         ("MIN_SEEDERS", "搜索结果做种数门槛", "", False),
         ("SCAN_INTERVAL", "辅种扫描间隔(秒)", "", False),
         ("TR_BAN_SITES", "tr被ban站点黑名单", "逗号分隔,命中站点不注入", False),
+        ("BACKUP_KEEP", "自动备份保留份数", "每天自动备份 DB+settings 到 /config/backups,保留最近 N 份", False),
+        ("LOG_KEEP_DAYS", "日志保留天数", "超过此天数的活动日志定期清理,防数据库膨胀", False),
     ]),
 ]
 SETTABLE = {k for _, fs in SETTING_GROUPS for k, _, _, _ in fs} | {"FREE_WATCH_IX"}   # 守候站点id由保种页按钮写入,不进表单
@@ -1416,7 +1420,9 @@ def qb_watcher():
     while True:
         try:
             qb = QB()
-            for t in qb.torrents():
+            tl = qb.torrents()
+            health_check("qb", True)
+            for t in tl:
                 if t.get("progress", 0) < 1: continue
                 # 普通种子要整理入库(需开关+TMDB);保种种子只转tr,无条件处理
                 if "keepseed" not in (t.get("tags") or "") and not (CFG["ORGANIZE"] and CFG["TMDB_KEY"]): continue
@@ -1426,6 +1432,7 @@ def qb_watcher():
                 logmsg("INFO", f"qb 下载完成，整理+转种: {t['name'][:44]}")
                 process_completed(qb, t)
         except Exception as e:
+            health_check("qb", False)
             logmsg("ERROR", f"qb监控异常: {e}")
         time.sleep(60)
 
@@ -1576,6 +1583,7 @@ def scanner():
     while True:
         try:
             torrents = tr.torrents()
+            health_check("tr", True)
             now = int(time.time())
             c = db()
             # 按“内容”(名字+大小)去重：辅种产生的副本和原种是同一内容，只处理一次，不重复辅种
@@ -1596,6 +1604,7 @@ def scanner():
                 except Exception as e: logmsg("ERROR", f"辅种异常 {t.get('name','')[:30]}: {e}")
                 time.sleep(8)  # 种子间隔，别打爆 Prowlarr
         except Exception as e:
+            health_check("tr", False)
             logmsg("ERROR", f"扫描异常: {e}")
         time.sleep(CFG["SCAN_INTERVAL"])
 
@@ -3856,6 +3865,61 @@ class Handler(BaseHTTPRequestHandler):
 
 def esc(t): return (t or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("'","&#39;")
 
+# ============ 稳定性:自动备份 / DB清理 / 心跳告警 ============
+def backup_data():
+    """每天把 DB + settings 打包到 /config/backups,保留最近 N 份"""
+    import tarfile, glob
+    bdir = os.path.join(os.path.dirname(CFG["DB"]), "backups")
+    os.makedirs(bdir, exist_ok=True)
+    out = os.path.join(bdir, "backup-" + time.strftime("%Y%m%d-%H%M%S") + ".tar.gz")
+    with tarfile.open(out, "w:gz") as tf:
+        for f in (CFG["DB"], SETTINGS_FILE):
+            if os.path.exists(f): tf.add(f, arcname=os.path.basename(f))
+    try: os.chmod(out, 0o600)   # 含 settings 密钥
+    except Exception: pass
+    baks = sorted(glob.glob(os.path.join(bdir, "backup-*.tar.gz")))
+    for old in baks[:-CFG["BACKUP_KEEP"]] if CFG["BACKUP_KEEP"] > 0 else []:
+        try: os.remove(old)
+        except Exception: pass
+    logmsg("INFO", f"🗄 已备份 → {os.path.basename(out)}(保留最近 {CFG['BACKUP_KEEP']} 份)")
+
+def cleanup_db():
+    """清 N 天前的日志 + 过期预存辅种,VACUUM 回收空间"""
+    c = db()
+    cut = int(time.time()) - CFG["LOG_KEEP_DAYS"] * 86400
+    n = c.execute("DELETE FROM log WHERE ts < ?", (cut,)).rowcount
+    c.execute("DELETE FROM pending_seed WHERE ts < ?", (int(time.time()) - 30 * 86400,))
+    c.commit(); c.close()
+    try:
+        v = sqlite3.connect(CFG["DB"]); v.isolation_level = None
+        v.execute("VACUUM"); v.close()
+    except Exception: pass
+    if n: logmsg("INFO", f"🧹 清理 {n} 条 {CFG['LOG_KEEP_DAYS']} 天前的日志,已 VACUUM")
+
+def housekeeper():
+    time.sleep(120)
+    last_bak = last_clean = 0
+    while True:
+        try:
+            if time.time() - last_bak > 86400:   backup_data(); last_bak = time.time()
+            if time.time() - last_clean > 86400:  cleanup_db(); last_clean = time.time()
+        except Exception as e:
+            logmsg("ERROR", f"维护任务异常: {e}")
+        time.sleep(3600)
+
+_HEALTH = {"qb": {"fail": 0}, "tr": {"fail": 0}}
+def health_check(name, ok):
+    """qb/tr 连续失败 3 次推微信告警,恢复也推一次。避免服务默默挂掉没人知道。"""
+    st = _HEALTH[name]
+    if ok:
+        if st["fail"] >= 3:
+            notify(f"✅ {name} 已恢复", f"{name} 连接恢复正常,已能读写")
+        st["fail"] = 0
+    else:
+        st["fail"] += 1
+        if st["fail"] == 3:
+            notify(f"⚠️ {name} 连接异常", f"已连续 3 次连不上 {name},检查下服务/网络/凭据")
+
 def main():
     init_db()
     org = "开" if CFG["ORGANIZE"] and CFG["TMDB_KEY"] else "关"
@@ -3866,6 +3930,7 @@ def main():
     threading.Thread(target=qb_watcher, daemon=True).start()
     threading.Thread(target=notify_worker, daemon=True).start()
     threading.Thread(target=free_watcher, daemon=True).start()
+    threading.Thread(target=housekeeper, daemon=True).start()
     try:   # 保种队列有存货(上次重启打断的)则自动续跑
         c = db(); nq = c.execute("SELECT COUNT(*) FROM keepseed WHERE status='queued'").fetchone()[0]; c.close()
         if nq:
