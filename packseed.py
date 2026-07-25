@@ -1846,10 +1846,16 @@ border-radius:980px;padding:3px 9px;box-shadow:0 4px 14px rgba(0,10,60,.45);lett
 .libbar input{flex:1;min-width:180px;background:rgba(255,255,255,.14);border:none;color:#fff;border-radius:12px;padding:10px 15px;font-size:13.5px;outline:none}
 .libbar input:focus{box-shadow:0 0 0 2.5px rgba(255,255,255,.5)}
 .libbar input::placeholder{color:rgba(255,255,255,.62)}
-.rfix{position:absolute;top:5px;right:5px;z-index:3;background:rgba(0,15,70,.66);backdrop-filter:blur(6px);border:none;color:#fff;
-border-radius:980px;width:24px;height:24px;font-size:12px;line-height:1;padding:0;cursor:pointer;opacity:0;transition:.18s}
-.rcard:hover .rfix{opacity:1}
-.rfix:hover{background:var(--pop);color:#00206e}
+.rfix{position:absolute;top:7px;right:7px;z-index:3;width:26px;height:26px;padding:0;cursor:pointer;
+display:flex;align-items:center;justify-content:center;border-radius:980px;
+background:rgba(0,20,80,.42);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.30);
+color:#fff;opacity:0;transform:scale(.82);transition:opacity .2s,transform .2s cubic-bezier(.2,.8,.3,1),background .2s}
+.rcard:hover .rfix{opacity:1;transform:scale(1)}
+.rfix:hover{background:#fff;color:var(--ikb);border-color:#fff;box-shadow:0 4px 14px rgba(0,10,60,.45)}
+.rfix svg{display:block}
+.rfix.busy{background:var(--pop);color:#00206e;border-color:var(--pop)}
+.rfix.busy svg{animation:rfspin .8s linear infinite}
+@keyframes rfspin{to{transform:rotate(360deg)}}
 .rcard.dim{opacity:.16}
 .rcard.hit .rbob{outline:2px solid var(--pop);outline-offset:3px;border-radius:12px}
 .pcard .pw{width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:12px;background:var(--card2);display:block;transition:.22s;box-shadow:0 6px 18px rgba(0,10,60,.45)}
@@ -2342,12 +2348,13 @@ function mFix(ev,btn){
  var v=prompt('识别错了?填片名、或 TMDB id(数字)。同一个 id 在电影和剧集里是两套编号,想指定就写 movie/79064 或 tv/12345。当前识别为「'+cur+'」',cur);
  if(v===null)return;
  v=v.trim();if(!v)return;
- btn.textContent='…';btn.disabled=true;
+ var icon=btn.innerHTML;                      // 存住 SVG,失败时还原,别被文字冲掉
+ btn.disabled=true;btn.style.opacity='1';btn.classList.add('busy');
  fetch('/api/reid?hash='+encodeURIComponent(btn.dataset.h)+'&q='+encodeURIComponent(v))
  .then(r=>r.json()).then(function(d){
   if(d.ok){toast('已重新入库:'+(d.name||v));setTimeout(()=>location.reload(),1200);}
-  else{toast('改识别失败:'+(d.err||''));btn.textContent='✏️';btn.disabled=false;}
- }).catch(function(){toast('出错了');btn.textContent='✏️';btn.disabled=false;});
+  else{toast('改识别失败:'+(d.err||''));btn.innerHTML=icon;btn.disabled=false;btn.classList.remove('busy');}
+ }).catch(function(){toast('出错了');btn.innerHTML=icon;btn.disabled=false;btn.classList.remove('busy');});
 }
 function accToggle(el){el.parentNode.classList.toggle('open');}
 function gotoSetup(){location.hash='#setup';}
@@ -3785,8 +3792,13 @@ class Handler(BaseHTTPRequestHandler):
                 thumb = f"<div class='rph mtile'>{ico}</div>"
             mt = mty or ("tv" if cat in ("电视剧", "动漫") else "movie")
             # 认错了随时能改:填片名或 TMDB id 重新识别(高置信度也可能错,比如《手机》)
+            # 线性铅笔图标(跟着 currentColor 变色),比 emoji 干净,和整体设计语言一致
             fix = (f"<button class=rfix title='识别错了?点这里改' data-h='{esc(ih)}' "
-                   f"data-n='{esc(title)}' onclick='mFix(event,this)'>✏️</button>")
+                   f"data-n='{esc(title)}' onclick='mFix(event,this)'>"
+                   f"<svg viewBox='0 0 24 24' width='13' height='13' fill='none' stroke='currentColor' "
+                   f"stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
+                   f"<path d='M4 20h4L19.5 8.5a2.12 2.12 0 0 0-3-3L5 17v3z'/>"
+                   f"<path d='M14.5 6.5l3 3'/></svg></button>")
             return (f"<div class=rcard title='{esc(nm)}' data-mt='{esc(mt)}' data-tid='{tid or 0}'><div class=rbob>{thumb}{fix}"
                     f"<div class=rname>{esc(title)}</div><div class=ryear>{esc(yr or '')}</div></div></div>")
         media_rows = ""
