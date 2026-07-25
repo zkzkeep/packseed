@@ -507,7 +507,7 @@ def _chat_pick_torrent(j):
         except Exception: ih = ""
         catmap = {"music": "音乐", "anime": "动漫", "tv": "电视剧", "movie": "电影"}
         cat = catmap.get(g.get("cat") or g.get("mtype")) or media_category(cname, None)
-        QB().add(data, category=cat, tags="packseed")
+        qb_conn().add(data, category=cat, tags="packseed")
         mates = [{"url": x["url"], "size": x.get("size", 0), "site": x.get("site", "")}
                  for x in (g.get("results") or []) if x.get("url") != pick.get("url")][:40]
         if cname and mates:
@@ -528,7 +528,7 @@ def _chat_undo():
     if not last or time.time() - last.get("ts", 0) > 1800:
         notify("❓ 没有可撤回的下载", "撤回窗口为下载后30分钟内"); return
     try:
-        qb = QB()
+        qb = qb_conn()
         t = next((x for x in qb.torrents() if last.get("hash") and x.get("hash","").lower() == last["hash"].lower()), None)
         if not t and last.get("cname"):
             t = next((x for x in qb.torrents() if x.get("name") == last["cname"]), None)
@@ -543,7 +543,7 @@ def _chat_undo():
         notify("❌ 撤回失败", str(e)[:50])
 
 def _chat_progress():
-    try: dl = [t for t in QB().torrents() if t.get("progress", 0) < 1]
+    try: dl = [t for t in qb_conn().torrents() if t.get("progress", 0) < 1]
     except Exception as e: notify("❌ 连不上 qb", str(e)[:40]); return
     if not dl: notify("📭 当前没有下载任务", "下载完的已自动入库+转种"); return
     lines = [f"{round(t.get('progress',0)*100)}% · {t['name'][:26]} · {human_size(t.get('dlspeed',0))}/s"
@@ -553,7 +553,7 @@ def _chat_progress():
 def _chat_stats():
     body = []
     try:
-        st = TR().call("session-stats", {}).get("arguments", {})
+        st = tr_conn().call("session-stats", {}).get("arguments", {})
         cur = st.get("current-stats", {}); cum = st.get("cumulative-stats", {})
         body.append(f"做种 {st.get('torrentCount',0)} 个 · 活跃 {st.get('activeTorrentCount',0)}")
         body.append(f"本次上传 {human_size(cur.get('uploadedBytes',0))} · 累计 {human_size(cum.get('uploadedBytes',0))}")
@@ -764,6 +764,20 @@ class TR:
         return s.call("torrent-add", {"metainfo":base64.b64encode(torrent_bytes).decode(),"download-dir":download_dir,"paused":False})
 
 # ============ qBittorrent WebUI（搜索下载的目标） ============
+_CONN = {"qb": None, "tr": None, "cfg": ""}
+def _conn_key():
+    return f'{CFG["QB_URL"]}|{CFG["QB_USER"]}|{CFG["QB_PASS"]}|{CFG["TR_URL"]}|{CFG["TR_USER"]}|{CFG["TR_PASS"]}'
+def qb_conn():
+    """复用同一个 QB 实例(带 cookie),别每个种子都重新登录——高频登录会触发 qb 的
+    「认证失败次数过多,IP 已封禁」,批量保种时尤其致命(血泪教训)。改设置后自动重建。"""
+    if _CONN["cfg"] != _conn_key(): _CONN.update(qb=None, tr=None, cfg=_conn_key())
+    if _CONN["qb"] is None: _CONN["qb"] = QB()
+    return _CONN["qb"]
+def tr_conn():
+    if _CONN["cfg"] != _conn_key(): _CONN.update(qb=None, tr=None, cfg=_conn_key())
+    if _CONN["tr"] is None: _CONN["tr"] = TR()
+    return _CONN["tr"]
+
 class QB:
     def __init__(s):
         s.url = CFG["QB_URL"].rstrip("/"); s.user = CFG["QB_USER"]; s.pw = CFG["QB_PASS"]; s.cookie = ""
@@ -783,14 +797,26 @@ class QB:
         if s.cookie: h["Cookie"] = s.cookie
         if extra: h.update(extra)
         return h
+    def _retry(s, fn):
+        """cookie 过期(403)时清掉重登一次。配合连接池:平时零登录,过期才补一次"""
+        try:
+            return fn()
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403) and s.pw:
+                s.cookie = ""; return fn()
+            raise
     def _post(s, path, params):
         data = urllib.parse.urlencode(params).encode()
-        req = urllib.request.Request(s.url+path, data=data,
-              headers=s._headers({"Content-Type":"application/x-www-form-urlencoded"}))
-        return urllib.request.urlopen(req, timeout=30).read().decode("utf-8","ignore")
+        def go():
+            req = urllib.request.Request(s.url+path, data=data,
+                  headers=s._headers({"Content-Type":"application/x-www-form-urlencoded"}))
+            return urllib.request.urlopen(req, timeout=30).read().decode("utf-8","ignore")
+        return s._retry(go)
     def _get(s, path):
-        req = urllib.request.Request(s.url+path, headers=s._headers())
-        return urllib.request.urlopen(req, timeout=30).read()
+        def go():
+            req = urllib.request.Request(s.url+path, headers=s._headers())
+            return urllib.request.urlopen(req, timeout=30).read()
+        return s._retry(go)
     def add(s, data, category="", tags="", savepath=""):
         b = "----packseed" + str(int(time.time()*1000)); parts = []
         def field(name, val):
@@ -1177,6 +1203,37 @@ def organize_music(ih, name, files):
     notify("🎵 音乐已入库", f"{name[:56]}\n{n}个文件 · {lrc}首歌词 · {cov}张封面,Navidrome可听")
     return root, n
 
+_AUDIO_EXT = (".flac", ".mp3", ".ape", ".wav", ".m4a", ".ogg", ".wv", ".dsf", ".dff")
+_COVER_NAMES = ("cover.jpg", "cover.png", "folder.jpg", "front.jpg", "Cover.jpg")
+_ALBUMS = {"ts": 0, "d": []}
+def music_albums(force=False):
+    """扫音乐库目录 → 专辑卡列表(封面/专辑名/歌手/歌曲数)。
+    比按种子列强得多:一张专辑一张卡、有真封面、多版本自动合并。缓存10分钟。"""
+    if not force and _ALBUMS["d"] and time.time() - _ALBUMS["ts"] < 600:
+        return _ALBUMS["d"]
+    root = CFG["MEDIA_MUSIC"]
+    out = []
+    if os.path.isdir(root):
+        for cur, dirs, fs in os.walk(root):
+            songs = [f for f in fs if os.path.splitext(f)[1].lower() in _AUDIO_EXT]
+            if not songs: continue                       # 只认真正装歌的目录 = 一张专辑
+            rel = os.path.relpath(cur, root)
+            if rel == ".": continue
+            parts = rel.split(os.sep)
+            album = parts[-1]
+            artist = parts[0] if len(parts) > 1 else ""
+            # 目录名常见 "歌手 - 专辑" 形式,拆出来更好看
+            m = re.match(r'^(.{1,30}?)\s*[-–]\s*(.+)$', album)
+            if m and not artist: artist, album = m.group(1).strip(), m.group(2).strip()
+            elif m and artist and artist in m.group(1): album = m.group(2).strip()
+            cov = next((c for c in _COVER_NAMES if os.path.exists(os.path.join(cur, c))), "")
+            out.append({"album": album, "artist": artist, "n": len(songs),
+                        "cover": os.path.join(rel, cov) if cov else "",
+                        "mtime": os.path.getmtime(cur)})
+    out.sort(key=lambda x: -x["mtime"])
+    _ALBUMS.update(ts=time.time(), d=out)
+    return out
+
 def _xesc(s): return (str(s or "")).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 def _tmdb_opener():
@@ -1353,7 +1410,7 @@ def transfer_to_tr(qb, ih, name, save_path):
         data = qb.export(ih)
         if data[:1] != b'd':
             logmsg("WARN", f"转种失败(导出非种子) {name[:36]}"); return False
-        tr = TR(); resp = tr.add(data, save_path); args = resp.get("arguments", {})
+        tr = tr_conn(); resp = tr.add(data, save_path); args = resp.get("arguments", {})
         added = args.get("torrent-added") or args.get("torrent-duplicate")
         if added:
             if added.get("id"):
@@ -1413,7 +1470,7 @@ def manual_organize(ih, query):
     """待确认条目：用户给 TMDB id 或片名，重新匹配并入库。数据可能已转到 tr。"""
     name = sp = None; files = []
     try:
-        tr = TR()
+        tr = tr_conn()
         t = next((x for x in tr.torrents() if x["hashString"].lower() == ih.lower()), None)
         if t:
             name = t["name"]; sp = t["downloadDir"]
@@ -1421,7 +1478,7 @@ def manual_organize(ih, query):
     except Exception: pass
     if not files:
         try:
-            qb = QB()
+            qb = qb_conn()
             t = next((x for x in qb.torrents() if x["hash"].lower() == ih.lower()), None)
             if t:
                 name = t["name"]; sp = t["save_path"]
@@ -1447,14 +1504,42 @@ def manual_organize(ih, query):
                  "tmdb_name": r.get("name") or r.get("title"), "year": _ryear(r), "conf": "manual", "q": query}
     if not m:
         return {"ok": False, "err": "TMDB 查不到，试试直接填 TMDB id"}
+    # 改识别前记下旧目标:入库过的条目改对之后,旧的错误目录要清掉,否则 Emby 里两条并存
+    old = None
+    try:
+        c = db(); row = c.execute("SELECT target,status FROM media WHERE info_hash=?", (ih,)).fetchone(); c.close()
+        if row and row[1] == "done": old = row[0]
+    except Exception: pass
     cat = media_category(name or "", m)
     dest, n = do_organize(ih, name or "", files, m, cat)
-    return {"ok": True, "name": f"{m['tmdb_name']} ({m['year']})", "n": n}
+    cleaned = _drop_old_media_dir(old, dest)
+    r = {"ok": True, "name": f"{m['tmdb_name']} ({m['year']})", "n": n}
+    if cleaned: r["cleaned"] = cleaned
+    return r
+
+def _drop_old_media_dir(old, new):
+    """改识别后删掉旧的错误媒体目录。只删媒体库根目录之下的子目录,且里面全是硬链接——
+    真实数据在下载目录由 tr/qb 持有,删这份副本不丢数据(硬链接减引用而已)。"""
+    if not old or not new or os.path.realpath(old) == os.path.realpath(new): return ""
+    roots = [os.path.realpath(p) for p in (CFG["MEDIA_TV"], CFG["MEDIA_MOVIE"],
+                                           CFG["MEDIA_ANIME"], CFG["MEDIA_MUSIC"]) if p]
+    try:
+        rp = os.path.realpath(old)
+        if not os.path.isdir(rp): return ""
+        if rp in roots: return ""                                  # 绝不删库根
+        if not any(rp.startswith(r + os.sep) for r in roots): return ""   # 必须在库内
+        import shutil as _sh
+        _sh.rmtree(rp)
+        logmsg("INFO", f"改识别:已清理旧目录 {os.path.basename(rp)}(硬链接副本,源数据仍在下载目录)")
+        return os.path.basename(rp)
+    except Exception as e:
+        logmsg("WARN", f"清理旧目录失败 {str(e)[:50]}")
+        return ""
 
 def _preseed(ih, name, mates):
     """下载时预存的同组候选辅种：不搜索,直接拿已知站点的种子来比对注入"""
     try:
-        tr = TR(); t = None
+        tr = tr_conn(); t = None
         for _ in range(20):                 # 最多等10分钟: 源必须校验到100%,否则注入的全是残种
             time.sleep(30)
             t = next((x for x in tr.torrents() if x["hashString"].lower() == ih.lower()), None)
@@ -1479,7 +1564,7 @@ def qb_watcher():
     time.sleep(20)
     while True:
         try:
-            qb = QB()
+            qb = qb_conn()
             tl = qb.torrents()
             health_check("qb", True)
             for t in tl:
@@ -1624,7 +1709,7 @@ def cross_seed_one(tr, t):
 def manual_research(info_hash, custom_query):
     # 手动兜底：用户指定关键词重搜一个种子
     try:
-        tr = TR(); ts = tr.torrents()
+        tr = tr_conn(); ts = tr.torrents()
         t = next((x for x in ts if x["hashString"] == info_hash), None)
         if not t:
             logmsg("WARN", f"手动重搜: 未找到种子 {info_hash[:12]}"); return
@@ -1639,7 +1724,7 @@ def set_status(ih, st):
 # ============ 扫描循环 ============
 def scanner():
     time.sleep(5)
-    tr = TR()
+    tr = tr_conn()
     while True:
         try:
             torrents = tr.torrents()
@@ -1736,6 +1821,10 @@ border-radius:980px;padding:3px 9px;box-shadow:0 4px 14px rgba(0,10,60,.45);lett
 .libbar input{flex:1;min-width:180px;background:rgba(255,255,255,.14);border:none;color:#fff;border-radius:12px;padding:10px 15px;font-size:13.5px;outline:none}
 .libbar input:focus{box-shadow:0 0 0 2.5px rgba(255,255,255,.5)}
 .libbar input::placeholder{color:rgba(255,255,255,.62)}
+.rfix{position:absolute;top:5px;right:5px;z-index:3;background:rgba(0,15,70,.66);backdrop-filter:blur(6px);border:none;color:#fff;
+border-radius:980px;width:24px;height:24px;font-size:12px;line-height:1;padding:0;cursor:pointer;opacity:0;transition:.18s}
+.rcard:hover .rfix{opacity:1}
+.rfix:hover{background:var(--pop);color:#00206e}
 .rcard.dim{opacity:.16}
 .rcard.hit .rbob{outline:2px solid var(--pop);outline-offset:3px;border-radius:12px}
 .pcard .pw{width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:12px;background:var(--card2);display:block;transition:.22s;box-shadow:0 6px 18px rgba(0,10,60,.45)}
@@ -2221,6 +2310,19 @@ function ksPush(btn){
  fetch('/api/ks/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ix:document.getElementById('ks-ix').value,items:picks})})
  .then(r=>r.json()).then(function(d){btn.disabled=false;toast(d.ok?('已入队 '+d.n+' 个,后台逐个拉取'):'失败');ksStatus();})
  .catch(function(){btn.disabled=false;toast('失败');});
+}
+function mFix(ev,btn){
+ ev.stopPropagation();ev.preventDefault();     // 别触发卡片的"看简介"
+ var cur=btn.dataset.n||'';
+ var v=prompt('识别错了?填正确的片名或 TMDB id(当前识别为「'+cur+'」)',cur);
+ if(v===null)return;
+ v=v.trim();if(!v)return;
+ btn.textContent='…';btn.disabled=true;
+ fetch('/api/reid?hash='+encodeURIComponent(btn.dataset.h)+'&q='+encodeURIComponent(v))
+ .then(r=>r.json()).then(function(d){
+  if(d.ok){toast('已重新入库:'+(d.name||v));setTimeout(()=>location.reload(),1200);}
+  else{toast('改识别失败:'+(d.err||''));btn.textContent='✏️';btn.disabled=false;}
+ }).catch(function(){toast('出错了');btn.textContent='✏️';btn.disabled=false;});
 }
 function accToggle(el){el.parentNode.classList.toggle('open');}
 function gotoSetup(){location.hash='#setup';}
@@ -3002,6 +3104,7 @@ _KS = {"running": False, "stop": False, "msg": "", "cur": ""}
 def keepseed_worker():
     """批量保种执行器:逐个下载种子推 qb,节流 + 磁盘水位保护"""
     _KS.update(running=True, stop=False, msg="")
+    fails = 0
     try:
         while not _KS["stop"]:
             free_gb = shutil.disk_usage("/data").free / 2**30
@@ -3015,12 +3118,23 @@ def keepseed_worker():
             try:
                 data = ks_download(url, int(ix) if str(ix).isdigit() else 0)
                 if data[:1] != b'd': raise RuntimeError("非种子文件")
-                res = QB().add(data, category="保种", tags="packseed,keepseed", savepath=CFG["KEEP_DIR"])
+                res = qb_conn().add(data, category="保种", tags="packseed,keepseed", savepath=CFG["KEEP_DIR"])
                 st, err = ("pushed", "") if "Ok" in res else ("error", (res.strip()[:40] or "qb拒绝"))
             except Exception as e:
                 st, err = "error", str(e)[:60]
             c = db(); c.execute("UPDATE keepseed SET status=?, err=? WHERE id=?", (st, err, rid)); c.commit(); c.close()
-            if st == "error": logmsg("WARN", f"保种拉取失败 {name[:36]}: {err}")
+            if st == "error":
+                logmsg("WARN", f"保种拉取失败 {name[:36]}: {err}")
+                fails += 1
+                # 熔断:连续失败多半是 qb 挂了/被自己登封禁了,继续猛推只会雪上加霜
+                if fails >= 5:
+                    _KS["msg"] = f"⛔ 连续 {fails} 个失败(最后一个: {err}),已自动暂停。修好后点「♻️ 重试失败」"
+                    logmsg("ERROR", f"批量保种连续失败{fails}次,熔断暂停: {err}")
+                    notify("⛔ 保种任务已暂停", f"连续 {fails} 个推送失败\n{err}\n检查 qb 是否正常,修好后去面板重试")
+                    break
+                time.sleep(10)                        # 失败后多喘一会儿
+            else:
+                fails = 0
             time.sleep(max(CFG["SNATCH_DELAY"], 3))   # 节流:别把站打炸
     finally:
         _KS.update(running=False, cur="")
@@ -3034,7 +3148,7 @@ def ks_autofill(ixid, query, target_gb, max_gb, max_seed, free_only=False, off_o
         c = db()
         have = {(r[0], r[1]) for r in c.execute("SELECT name,size FROM keepseed").fetchall()}
         c.close()
-        try: have |= {(t["name"], t["totalSize"]) for t in TR().torrents()}
+        try: have |= {(t["name"], t["totalSize"]) for t in tr_conn().torrents()}
         except Exception: pass
         total = added = 0; target = target_gb * 2**30; seen_urls = set()
         for page in range(400):           # 页数兜底,防意外空转
@@ -3159,7 +3273,7 @@ def health_report(force=False):
     fields = ["name", "totalSize", "status", "error", "errorString", "peersConnected",
               "activityDate", "trackerStats", "downloadDir", "uploadRatio", "uploadedEver"]
     try:
-        ts = TR().call("torrent-get", {"fields": fields}).get("arguments", {}).get("torrents", [])
+        ts = tr_conn().call("torrent-get", {"fields": fields}).get("arguments", {}).get("torrents", [])
     except Exception as e:
         return {"ok": False, "err": str(e)[:60]}
     now = time.time()
@@ -3224,7 +3338,7 @@ _VIDEXT = (".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".wmv", ".mov", ".flv", ".web
 def _biggest_video(ih):
     """种子里最大的视频文件绝对路径(容器内)。辅种副本也能定位到同一份数据。"""
     try:
-        for src in (TR().torrents(), QB().torrents()):
+        for src in (tr_conn().torrents(), qb_conn().torrents()):
             for t in src:
                 h = t.get("hashString") or t.get("hash") or ""
                 if h.lower() != ih.lower(): continue
@@ -3516,6 +3630,8 @@ class Handler(BaseHTTPRequestHandler):
             s._wecom_get(); return
         if s.path.startswith("/api/poster"):
             s._poster(); return          # 公开海报,免登录(图文通知的图要外网可达)
+        if s.path.startswith("/api/cover"):
+            s._cover(); return           # 专辑封面,免登录(和海报同待遇)
         if s.path.startswith("/api/shot"):
             s._shot(); return            # 发种截图,免登录(PT站要外网可达)
         if s.path.startswith("/api/bgv"):
@@ -3643,7 +3759,10 @@ class Handler(BaseHTTPRequestHandler):
                 ico = {"音乐":"🎵","漫画/书":"📖"}.get(cat, "🎬")
                 thumb = f"<div class='rph mtile'>{ico}</div>"
             mt = mty or ("tv" if cat in ("电视剧", "动漫") else "movie")
-            return (f"<div class=rcard title='{esc(nm)}' data-mt='{esc(mt)}' data-tid='{tid or 0}'><div class=rbob>{thumb}"
+            # 认错了随时能改:填片名或 TMDB id 重新识别(高置信度也可能错,比如《手机》)
+            fix = (f"<button class=rfix title='识别错了?点这里改' data-h='{esc(ih)}' "
+                   f"data-n='{esc(title)}' onclick='mFix(event,this)'>✏️</button>")
+            return (f"<div class=rcard title='{esc(nm)}' data-mt='{esc(mt)}' data-tid='{tid or 0}'><div class=rbob>{thumb}{fix}"
                     f"<div class=rname>{esc(title)}</div><div class=ryear>{esc(yr or '')}</div></div></div>")
         media_rows = ""
         if pend:
@@ -3663,12 +3782,30 @@ class Handler(BaseHTTPRequestHandler):
                                f"<div class=rs style='margin-top:6px'><input placeholder='TMDB id 或 片名' value=''>"
                                f"<button onclick=\"reid('{esc(ih)}',this)\">确认</button>{skipbtn}</div></div>")
             media_rows += "</div>"
+        def acard(a):
+            """专辑卡:真封面 + 专辑名 + 歌手·N首歌(音乐按专辑聚合,不再一首歌一张灰砖)"""
+            if a["cover"]:
+                thumb = f"<img loading=lazy src='/api/cover?p={urllib.parse.quote(a['cover'])}'>"
+            else:
+                thumb = "<div class='rph mtile'>🎵</div>"
+            sub = (a["artist"] + " · " if a["artist"] else "") + f"{a['n']} 首"
+            return (f"<div class=rcard title='{esc(a['album'])}'><div class=rbob>{thumb}"
+                    f"<div class=rname>{esc(a['album'])}</div><div class=ryear>{esc(sub)}</div></div></div>")
+        try: albums = music_albums()
+        except Exception: albums = []
         for ci, (cname, icon) in enumerate(CATS):
-            items = buckets.get(cname) or []
-            if not items: continue
-            # 每类一条河:默认只放最新 20 个(流动展示),点「全部」摊开成网格
-            river = "".join(mcard(r) for r in items[:20])
-            grid = "".join(mcard(r) for r in items)
+            if cname == "音乐":
+                # 音乐走目录扫描出的专辑卡(有封面、按专辑合并、标歌曲数)
+                if not albums: continue
+                river = "".join(acard(a) for a in albums[:20])
+                grid = "".join(acard(a) for a in albums)
+                items = albums
+            else:
+                items = buckets.get(cname) or []
+                if not items: continue
+                # 每类一条河:默认只放最新 20 个(流动展示),点「全部」摊开成网格
+                river = "".join(mcard(r) for r in items[:20])
+                grid = "".join(mcard(r) for r in items)
             more = (f" <button class=dlbtn style='padding:3px 14px;font-size:12px;margin-left:6px' "
                     f"onclick=\"mToggle({ci},this)\">全部 {len(items)} 项</button>") if len(items) > 5 else ""
             media_rows += (f"<div class=sgrp style='padding:0 20px'>{icon} {cname} "
@@ -3689,7 +3826,7 @@ class Handler(BaseHTTPRequestHandler):
                     .replace("{{TOTAL}}", str(t_total)).replace("{{INJECT}}", str(t_inject))
                     .replace("{{DONE}}", str(t_done)).replace("{{NOMATCH}}", str(t_nomatch))
                     .replace("{{ROWS}}", rows or "<tr><td colspan=6><div class=empty><div class=ei>🌱</div><div class=et>还没有辅种记录</div><div>后台每隔一阵扫描 tr 里的种子,自动全站找同内容注入 · 有种子后这里就有了</div></div></td></tr>")
-                    .replace("{{MEDIACOUNT}}", str(sum(len(v) for v in buckets.values())))
+                    .replace("{{MEDIACOUNT}}", str(sum(len(v) for k, v in buckets.items() if k != "音乐") + len(albums)))
                     .replace("{{MEDIA}}", media_rows or "<div class=mut style='padding:4px 20px 16px'>暂无入库记录</div>")
                     .replace("{{RECENT}}", recent or "<div class=mut style='padding:4px 0 8px'>还没有带海报的入库记录,下一部片就有了</div>")
                     .replace("{{EMBYPUB}}", os.environ.get("EMBY_PUBLIC", "https://emby.leesy.cc"))
@@ -3810,7 +3947,7 @@ class Handler(BaseHTTPRequestHandler):
         h = (parse_qs(urlparse(s.path).query).get("hash",[""])[0]).strip()
         if not h: s._send_json({"ok":False,"err":"缺hash"}); return
         try:
-            qb = QB()
+            qb = qb_conn()
             t = next((x for x in qb.torrents() if x.get("hash")==h), None)
             qb.delete(h, delete_files=True)   # 删任务+已下数据(取消=不要了)
             _DLMETA.pop(h, None)
@@ -3870,10 +4007,10 @@ class Handler(BaseHTTPRequestHandler):
         svc = (parse_qs(urlparse(s.path).query).get("svc", [""])[0])
         try:
             if svc == "tr":
-                v = TR().call("session-get", {})["arguments"].get("version", "?")
+                v = tr_conn().call("session-get", {})["arguments"].get("version", "?")
                 s._send_json({"ok": True, "msg": f"Transmission {v}"})
             elif svc == "qb":
-                v = QB()._get("/api/v2/app/version").decode("utf-8", "ignore")
+                v = qb_conn()._get("/api/v2/app/version").decode("utf-8", "ignore")
                 s._send_json({"ok": True, "msg": f"qBittorrent {v}"})
             elif svc == "prowlarr":
                 req = urllib.request.Request(CFG["PROWLARR_URL"].rstrip("/") + "/api/v1/indexer",
@@ -3908,14 +4045,14 @@ class Handler(BaseHTTPRequestHandler):
             out["disk"] = {"total": du.total, "used": du.used, "free": du.free}
         except Exception: pass
         try:
-            st = TR().call("session-stats", {})["arguments"]
+            st = tr_conn().call("session-stats", {})["arguments"]
             out["tr"] = {"up": st.get("uploadSpeed", 0), "down": st.get("downloadSpeed", 0),
                          "count": st.get("torrentCount", 0), "active": st.get("activeTorrentCount", 0),
                          "up_today": (st.get("current-stats") or {}).get("uploadedBytes", 0),
                          "up_total": (st.get("cumulative-stats") or {}).get("uploadedBytes", 0)}
         except Exception: pass
         try:
-            q = json.loads(QB()._get("/api/v2/transfer/info").decode())
+            q = json.loads(qb_conn()._get("/api/v2/transfer/info").decode())
             out["qb"] = {"down": q.get("dl_info_speed", 0), "up": q.get("up_info_speed", 0)}
         except Exception: pass
         global _DASH_MEDIA
@@ -3940,7 +4077,7 @@ class Handler(BaseHTTPRequestHandler):
     def _downloads(s):
         out = {"dl": [], "done": []}
         try:
-            for t in QB().torrents():
+            for t in qb_conn().torrents():
                 eta = t.get("eta", 0) or 0; prog = (t.get("progress") or 0)
                 if eta >= 8640000 or prog >= 1: etas = ""
                 elif eta >= 3600: etas = f"{eta//3600}时{eta%3600//60}分"
@@ -4020,6 +4157,20 @@ class Handler(BaseHTTPRequestHandler):
         data = open(fp, "rb").read()
         s.send_response(200); s.send_header("Content-Type","image/jpeg")
         s.send_header("Cache-Control","max-age=604800"); s.send_header("Content-Length",str(len(data)))
+        s.end_headers(); s.wfile.write(data)
+    def _cover(s):
+        """音乐专辑封面:只允许音乐库根目录之内的相对路径,realpath 二次校验防穿越"""
+        from urllib.parse import urlparse, parse_qs, unquote
+        p = unquote((parse_qs(urlparse(s.path).query).get("p", [""])[0]).strip())
+        root = os.path.realpath(CFG["MEDIA_MUSIC"])
+        fp = os.path.realpath(os.path.join(root, p))
+        if ".." in p or not fp.startswith(root + os.sep) or not os.path.isfile(fp) \
+           or os.path.splitext(fp)[1].lower() not in (".jpg", ".jpeg", ".png"):
+            s.send_response(404); s.end_headers(); return
+        data = open(fp, "rb").read()
+        s.send_response(200)
+        s.send_header("Content-Type", "image/png" if fp.lower().endswith(".png") else "image/jpeg")
+        s.send_header("Cache-Control", "max-age=604800"); s.send_header("Content-Length", str(len(data)))
         s.end_headers(); s.wfile.write(data)
     # ---- 批量保种 ----
     def _ks(s):
@@ -4141,7 +4292,7 @@ class Handler(BaseHTTPRequestHandler):
                                         (cname, json.dumps(mates[:60], ensure_ascii=False), int(time.time())))
                     c.commit(); c.close()
                 except Exception: pass
-            res = QB().add(data, category=cat, tags="packseed")
+            res = qb_conn().add(data, category=cat, tags="packseed")
             ok = "Ok" in res
             logmsg("INFO", f"搜索下载 → qb[{cat}]: {(cname or u)[:40]} [{res.strip()[:16] or 'ok'}]")
             s._send_json({"ok":ok, "err":"" if ok else (res[:60] or "qb 拒绝")})
@@ -4198,18 +4349,23 @@ def housekeeper():
             logmsg("ERROR", f"维护任务异常: {e}")
         time.sleep(3600)
 
-_HEALTH = {"qb": {"fail": 0}, "tr": {"fail": 0}}
+_HEALTH = {"qb": {"fail": 0, "seen": False, "alerted": False},
+           "tr": {"fail": 0, "seen": False, "alerted": False}}
 def health_check(name, ok):
-    """qb/tr 连续失败 3 次推微信告警,恢复也推一次。避免服务默默挂掉没人知道。"""
+    """qb/tr 掉线告警。三条防误报的规矩(都是踩坑换来的):
+    ①必须先成功连上过一次才可能告警——刚重启/服务还没起来的那几轮不算数;
+    ②阈值提到 5 次(高负载下偶发超时很正常,别一抖就喊);
+    ③同一次故障只告警一次,恢复后才重新武装。"""
     st = _HEALTH[name]
     if ok:
-        if st["fail"] >= 3:
+        if st["alerted"]:
             notify(f"✅ {name} 已恢复", f"{name} 连接恢复正常,已能读写")
-        st["fail"] = 0
+        st.update(fail=0, seen=True, alerted=False)
     else:
         st["fail"] += 1
-        if st["fail"] == 3:
-            notify(f"⚠️ {name} 连接异常", f"已连续 3 次连不上 {name},检查下服务/网络/凭据")
+        if st["seen"] and not st["alerted"] and st["fail"] >= 5:
+            st["alerted"] = True
+            notify(f"⚠️ {name} 连接异常", f"已连续 {st['fail']} 次连不上 {name},检查下服务/网络/凭据")
 
 def main():
     init_db()
