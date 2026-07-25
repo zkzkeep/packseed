@@ -1487,15 +1487,36 @@ def manual_organize(ih, query):
     if not files:
         return {"ok": False, "err": "qb/tr 里都找不到该种子的文件"}
     m = None
-    if query.isdigit():   # 纯数字 = TMDB id，剧/影都试
-        for mt in ("tv", "movie"):
+    # 支持显式指定类型: movie/79064 或 tv/79064(TMDB 的 id 在剧/影里是两套独立编号!
+    # 同一个 79064,tv 是《富贵男》、movie 才是《手机》,不能撞到哪个算哪个)
+    want = ""
+    mp = re.match(r'^(movie|tv|电影|剧集|电视剧)\s*[/:：\s]\s*(\d+)$', query, re.I)
+    if mp:
+        want = "tv" if mp.group(1).lower() in ("tv", "剧集", "电视剧") else "movie"
+        query = mp.group(2)
+    if query.isdigit():
+        cands = []
+        for mt in (["tv", "movie"] if not want else [want]):
             try:
                 d = _tmdb_call(f"/{mt}/{query}", language="zh-CN")
                 if d.get("id"):
-                    m = {"mtype": mt, "id": d["id"], "tmdb_name": d.get("name") or d.get("title"),
-                         "year": (d.get("first_air_date") or d.get("release_date") or "")[:4], "conf": "manual", "q": query}
-                    break
+                    cands.append({"mtype": mt, "id": d["id"], "tmdb_name": d.get("name") or d.get("title"),
+                                  "orig": d.get("original_name") or d.get("original_title") or "",
+                                  "year": (d.get("first_air_date") or d.get("release_date") or "")[:4],
+                                  "conf": "manual", "q": query})
             except Exception: continue
+        if cands:
+            low = re.sub(r'[^a-z0-9一-鿿]', '', (name or "").lower())
+            hint = "tv" if meta_is_tv(name or "") else "movie"
+            def score(x):
+                s = 0
+                for t in (x.get("tmdb_name"), x.get("orig")):
+                    tt = re.sub(r'[^a-z0-9一-鿿]', '', (t or "").lower())
+                    if tt and tt in low: s += 3          # 片名出现在种子名里 = 强证据
+                if x.get("year") and x["year"] in (name or ""): s += 2   # 年份对得上
+                if x["mtype"] == hint: s += 1            # 种子名像剧/像影
+                return s
+            m = max(cands, key=score)
     else:                 # 否则当片名搜
         cand = _tmdb_search(query)
         if cand:
@@ -2314,7 +2335,7 @@ function ksPush(btn){
 function mFix(ev,btn){
  ev.stopPropagation();ev.preventDefault();     // 别触发卡片的"看简介"
  var cur=btn.dataset.n||'';
- var v=prompt('识别错了?填正确的片名或 TMDB id(当前识别为「'+cur+'」)',cur);
+ var v=prompt('识别错了?填片名、或 TMDB id(数字)。同一个 id 在电影和剧集里是两套编号,想指定就写 movie/79064 或 tv/12345。当前识别为「'+cur+'」',cur);
  if(v===null)return;
  v=v.trim();if(!v)return;
  btn.textContent='…';btn.disabled=true;
