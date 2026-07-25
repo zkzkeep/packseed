@@ -1503,6 +1503,8 @@ def manual_organize(ih, query):
                     cands.append({"mtype": mt, "id": d["id"], "tmdb_name": d.get("name") or d.get("title"),
                                   "orig": d.get("original_name") or d.get("original_title") or "",
                                   "year": (d.get("first_air_date") or d.get("release_date") or "")[:4],
+                                  "poster": d.get("poster_path") or "",   # 别漏!漏了海报墙和刮削包的 poster.jpg 都是空的
+                                  "overview": d.get("overview") or "",
                                   "conf": "manual", "q": query})
             except Exception: continue
         if cands:
@@ -1522,7 +1524,9 @@ def manual_organize(ih, query):
         if cand:
             r = cand[0]
             m = {"mtype": "tv" if r.get("media_type") == "tv" else "movie", "id": r.get("id"),
-                 "tmdb_name": r.get("name") or r.get("title"), "year": _ryear(r), "conf": "manual", "q": query}
+                 "tmdb_name": r.get("name") or r.get("title"), "year": _ryear(r),
+                 "poster": r.get("poster_path") or "", "overview": r.get("overview") or "",
+                 "conf": "manual", "q": query}
     if not m:
         return {"ok": False, "err": "TMDB 查不到，试试直接填 TMDB id"}
     # 改识别前记下旧目标:入库过的条目改对之后,旧的错误目录要清掉,否则 Emby 里两条并存
