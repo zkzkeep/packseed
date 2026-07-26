@@ -755,6 +755,17 @@ class TR:
             except urllib.error.HTTPError as e:
                 if e.code == 409:
                     s.sid = e.headers["X-Transmission-Session-Id"]; continue
+                # tr 3.00 的暴力破解保护:任何一个不带正确 Authorization 的请求都会让计数+1,
+                # 攒够 100 就对所有请求(包括凭据正确的)返回 403,且只有重启守护进程才清零。
+                # 裸报 "HTTP Error 403" 会让人误以为是索引器/站点风控,这里把真因说清楚。
+                body = ""
+                try: body = e.read().decode("utf-8", "ignore")
+                except Exception: pass
+                if e.code == 403 and "login attempt" in body.lower():
+                    raise RuntimeError("Transmission 已被暴力破解保护锁定(累计100次认证失败),"
+                                       "需 docker restart transmission;若反复锁定,检查 9091 是否暴露在公网")
+                if e.code == 401:
+                    raise RuntimeError("Transmission 认证失败,检查 TR_USER/TR_PASS")
                 raise
         raise RuntimeError("tr rpc fail")
     def torrents(s):
@@ -1833,6 +1844,28 @@ a{color:var(--accL);text-decoration:none}
 .fpill{padding:6px 16px;border-radius:980px;background:rgba(255,255,255,.14);cursor:pointer;font-size:13px;font-weight:600;color:rgba(255,255,255,.8);user-select:none;transition:.18s}
 .fpill:hover{color:#fff;background:rgba(255,255,255,.2)}
 .fpill.on{background:#fff;color:var(--ikb)}
+/* 找人是「换一种搜法」,不是筛选,所以独立于 fpill,免得被 activeF() 当成分类 */
+.ppill{padding:6px 16px;border-radius:980px;background:rgba(255,212,0,.18);cursor:pointer;font-size:13px;font-weight:600;
+ color:#ffe98a;user-select:none;transition:.18s;border:1px solid rgba(255,212,0,.42)}
+.ppill:hover{background:rgba(255,212,0,.28);color:#fff}
+.ppill.on{background:var(--pop,#FFD400);color:#4a3400;border-color:transparent}
+.pgrp{display:flex;align-items:baseline;gap:10px;padding:16px 16px 8px;font-size:15px;font-weight:700}
+.pgrp .c{font-size:12px;font-weight:600;color:var(--sub)}
+.perscard{display:flex;gap:14px;align-items:center;padding:12px 14px;border-radius:16px;background:var(--card2);
+ cursor:pointer;margin:8px 0;transition:.18s;border:1px solid transparent}
+.perscard:hover{background:rgba(255,255,255,.24);border-color:rgba(255,255,255,.4);transform:translateY(-2px)}
+/* img 是替换元素,给它 display:flex 会把图渲染没(图其实加载成功),所以图和占位符分开写 */
+.perscard img,.perscard .np{width:54px;height:54px;border-radius:50%;flex:none;background:var(--card2)}
+.perscard img{display:block;object-fit:cover}
+.perscard .np{display:flex;align-items:center;justify-content:center;font-size:24px}
+.phero{display:flex;gap:16px;align-items:center;padding:4px 2px 12px}
+.phero img,.phero .np{width:76px;height:76px;border-radius:50%;flex:none;background:var(--card2)}
+.phero img{display:block;object-fit:cover}
+.phero .np{display:flex;align-items:center;justify-content:center;font-size:32px}
+.pcard .prole{font-size:11px;color:var(--sub);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.morebtn{margin:10px 16px;padding:7px 16px;border-radius:980px;background:rgba(255,255,255,.16);border:none;color:#fff;
+ cursor:pointer;font-size:12px;font-weight:600;font-family:inherit}
+.morebtn:hover{background:rgba(255,255,255,.26)}
 .wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(136px,1fr));gap:18px;padding:16px 20px}
 .pcard{cursor:pointer;border-radius:14px;transition:.22s cubic-bezier(.2,.8,.3,1)}
 .pcard{transition:transform .45s cubic-bezier(.22,.9,.32,1),opacity .45s ease}
@@ -2034,6 +2067,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 <span class=fpill data-f=anime onclick=tgF(this)>🎌 动漫</span>
 <span class=fpill data-f=book onclick=tgF(this)>📖 漫画/书</span>
 <span class=fpill data-f=music onclick=tgF(this)>🎵 音乐</span>
+<span class=ppill id=ppill onclick=tgP(this)>👤 找人</span>
 </div>
 </div>
 <div id=sresult></div>
@@ -2688,7 +2722,10 @@ function renderWall(){
  var gs=(d.groups||[]).filter(g=>!f||g.cat==f);
  var ot=(d.other||[]).filter(x=>!f||x.cat==f);
  box.innerHTML='';
- if(!gs.length&&!ot.length){box.innerHTML='<div class=mut style="padding:10px 16px">该类型下没有结果，点掉类型看全部</div>';return;}
+ var _bk=mkBack();if(_bk)box.appendChild(_bk);
+ if(!gs.length&&!ot.length){
+  var _e=document.createElement('div');_e.className='mut';_e.style.padding='10px 16px';
+  _e.textContent='该类型下没有结果，点掉类型看全部';box.appendChild(_e);return;}
  var wall=document.createElement('div');wall.className='wall';
  var sel=document.createElement('div');sel.id='selres';
  function pick(card,rs,label){
@@ -2725,10 +2762,145 @@ function renderWall(){
  }
  box.appendChild(wall);box.appendChild(sel);
 }
+/* ---- 找人:演员/导演片单。全程 DOM API 拼,不拼 HTML 字符串 ---- */
+var _pmode=false,_pd=null,_pmore=false,_backto=null;
+function tgP(el){
+ _pmode=!_pmode;
+ el.classList.toggle('on',_pmode);
+ var q=document.getElementById('q');
+ q.placeholder=_pmode?'演员 / 导演名字,回车列出他的全部作品':'片名 / 剧名 / 专辑,回车即搜';
+ q.focus();
+}
+function pmsg(box,txt){
+ box.innerHTML='';
+ var c=document.createElement('div');c.className='card';
+ var m=document.createElement('div');m.className='mut';m.textContent=txt;
+ c.appendChild(m);box.appendChild(c);
+}
+function avatar(path,ph){
+ if(path){var im=document.createElement('img');im.loading='lazy';
+  im.src='/api/poster?p='+encodeURIComponent(path);return im;}
+ var d=document.createElement('div');d.className='np';d.textContent=ph;return d;
+}
+function doPerson(q){
+ var box=document.getElementById('sresult');
+ _pd=null;_backto=null;
+ pmsg(box,'正在 TMDB 查「'+q+'」的资料…');
+ fetch('/api/person?q='+encodeURIComponent(q)).then(r=>r.json()).then(function(d){
+  if(!d.ok){pmsg(box,'查不了：'+(d.err||''));return;}
+  var l=d.list||[];
+  if(!l.length){pmsg(box,'没找到叫「'+q+'」的人。TMDB 对冷门或港台演员有时只收英文名,试试拼音/英文名。');return;}
+  if(l.length===1){loadCredits(l[0].id);return;}
+  renderPersons(l,q);
+ }).catch(function(){pmsg(box,'请求出错');});
+}
+function renderPersons(l,q){
+ var box=document.getElementById('sresult');box.innerHTML='';
+ var c=document.createElement('div');c.className='card';
+ var h=document.createElement('h2');h.textContent='👤 叫「'+q+'」的有 '+l.length+' 位,你要找哪个?';
+ c.appendChild(h);
+ l.forEach(function(p){
+  var r=document.createElement('div');r.className='perscard';
+  r.appendChild(avatar(p.profile,'👤'));
+  var t=document.createElement('div');t.style.minWidth='0';
+  var n=document.createElement('div');n.style.fontWeight='700';
+  n.textContent=p.name+(p.dept?'  ·  '+p.dept:'');t.appendChild(n);
+  var s=document.createElement('div');s.className='mut';s.style.fontSize='12px';
+  s.textContent=p.known||'（TMDB 没列代表作）';t.appendChild(s);
+  r.appendChild(t);
+  r.onclick=function(){loadCredits(p.id);};
+  c.appendChild(r);
+ });
+ box.appendChild(c);
+}
+function loadCredits(pid){
+ var box=document.getElementById('sresult');
+ pmsg(box,'正在拉片单…');
+ fetch('/api/personcredits?id='+encodeURIComponent(pid)).then(r=>r.json()).then(function(d){
+  if(!d.ok){pmsg(box,'取片单失败：'+(d.err||''));return;}
+  _pd=d;_pmore=false;renderCredits();
+ }).catch(function(){pmsg(box,'请求出错');});
+}
+function renderCredits(){
+ var d=_pd,box=document.getElementById('sresult');if(!d)return;
+ box.innerHTML='';_backto=null;
+ var c=document.createElement('div');c.className='card';
+ var hero=document.createElement('div');hero.className='phero';
+ hero.appendChild(avatar(d.person.profile,'👤'));
+ var ht=document.createElement('div');ht.style.minWidth='0';
+ var hn=document.createElement('div');hn.style.fontSize='19px';hn.style.fontWeight='800';
+ hn.textContent=d.person.name+(d.person.dept?'  ·  '+d.person.dept:'');ht.appendChild(hn);
+ var hs=document.createElement('div');hs.className='mut';hs.style.fontSize='12px';hs.style.marginTop='3px';
+ hs.textContent='共 '+d.stat.total+' 部作品 · 电影 '+d.stat.movie+' · 电视剧 '+d.stat.tv+' · 已入库 '+d.stat.owned+' 部';
+ ht.appendChild(hs);hero.appendChild(ht);c.appendChild(hero);
+ var hint=document.createElement('div');hint.className='mut';hint.style.fontSize='12px';
+ hint.textContent='绿框=库里已有 · 点没入库的海报才去各站搜种(一次只搜一部,不打爆站)';
+ c.appendChild(hint);box.appendChild(c);
+ [['movie','🎬 电影'],['tv','📺 电视剧']].forEach(function(pair){
+  var arr=d[pair[0]]||[];if(!arr.length)return;
+  var show=_pmore?arr:arr.filter(function(x){return !x.minor;});
+  var hid=arr.length-show.length;
+  if(!show.length){show=arr;hid=0;}
+  var g=document.createElement('div');g.className='pgrp';
+  var gt=document.createElement('span');gt.textContent=pair[1];g.appendChild(gt);
+  var gc=document.createElement('span');gc.className='c';
+  gc.textContent=arr.length+' 部 · 已入库 '+arr.filter(function(x){return x.owned;}).length;
+  g.appendChild(gc);box.appendChild(g);
+  var wall=document.createElement('div');wall.className='wall';
+  show.forEach(function(it){wall.appendChild(workCard(it));});
+  box.appendChild(wall);
+  if(hid>0){
+   var b=document.createElement('button');b.className='morebtn';
+   b.textContent='＋ 展开 '+hid+' 部冷门/客串';
+   b.onclick=function(){_pmore=true;renderCredits();};
+   box.appendChild(b);
+  }
+ });
+}
+function workCard(it){
+ var card=document.createElement('div');card.className='pcard';
+ if(it.owned)card.classList.add('owned');
+ var pw=document.createElement('div');pw.style.position='relative';
+ if(it.poster){var im=document.createElement('img');im.className='pw';im.loading='lazy';
+  im.src='/api/poster?p='+encodeURIComponent(it.poster);pw.appendChild(im);}
+ else{var ph=document.createElement('div');ph.className='ph';
+  ph.textContent=it.mtype==='tv'?'📺':'🎬';pw.appendChild(ph);}
+ if(it.owned){var ob=document.createElement('div');ob.className='ownbadge';
+  ob.textContent='✓ '+it.owned;pw.appendChild(ob);}
+ card.appendChild(pw);
+ var nm=document.createElement('div');nm.className='pname';
+ nm.textContent=it.name+(it.year?' ('+it.year+')':'');card.appendChild(nm);
+ var mt=document.createElement('div');mt.className='pmeta';
+ mt.textContent=(it.mtype==='tv'?'剧集':'电影')+(it.eps?' · '+it.eps+' 集':'');card.appendChild(mt);
+ if(it.role){var rl=document.createElement('div');rl.className='prole';
+  rl.textContent=it.role;card.appendChild(rl);}
+ card.title=it.overview||'';
+ card.onclick=function(){searchWork(it);};
+ return card;
+}
+function searchWork(it){
+ var box=document.getElementById('sresult');
+ box.innerHTML=VOYAGE;
+ _backto=(_pd&&_pd.person)?_pd.person.name:'';
+ var q=it.name+(it.year?' '+it.year:'');
+ fetch('/api/search2?q='+encodeURIComponent(q)).then(r=>r.json()).then(function(d){
+  if(!d.ok){pmsg(box,'提交失败：'+(d.err||''));return;}
+  pollJob(d.id,box,Date.now());
+ }).catch(function(){pmsg(box,'提交出错');});
+}
+function mkBack(){
+ if(!_backto)return null;
+ var b=document.createElement('button');b.className='morebtn';
+ b.textContent='← 返回 '+_backto+' 的作品';
+ b.onclick=function(){renderCredits();};
+ return b;
+}
 function doSearch(){
  var q=document.getElementById('q').value.trim();if(!q)return;
  clearTimeout(_t);
  var box=document.getElementById('sresult');
+ if(_pmode){doPerson(q);return;}
+ _backto=null;
  box.innerHTML=VOYAGE;
  fetch('/api/search2?q='+encodeURIComponent(q)).then(r=>r.json()).then(function(d){
   if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">提交失败：'+(d.err||'')+'</div>';return;}
@@ -2785,7 +2957,10 @@ function pollJob(id,box,t0){
   }
   var d=j.result||{};
   if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">搜索失败：'+(d.err||'')+'</div>';return;}
-  if(!(d.groups||[]).length&&!(d.other||[]).length){box.innerHTML='<div class=empty><div class=ei>🔍</div><div class=et>没搜到结果</div><div>试试英文片名 · 换个更短的关键词 · 或去设置检查 Prowlarr 连接</div></div>';return;}
+  if(!(d.groups||[]).length&&!(d.other||[]).length){
+   box.innerHTML='<div class=empty><div class=ei>🔍</div><div class=et>没搜到结果</div><div>试试英文片名 · 换个更短的关键词 · 或去设置检查 Prowlarr 连接</div></div>';
+   var _bk=mkBack();if(_bk)box.insertBefore(_bk,box.firstChild);
+   return;}
   _sd=d;renderWall();
  }).catch(function(){setTimeout(function(){pollJob(id,box,t0);},2500);});
 }
@@ -2890,18 +3065,40 @@ def library_index():
     """本地媒体库索引(缓存60秒):tmdbid→已入库标注、片名集合。用来给搜索结果打「已有」防重复下载"""
     if _LIBIX["d"] and time.time() - _LIBIX["t"] < 60:
         return _LIBIX["d"]
-    ids = {}; names = set()
+    ids = {}; keys = {}; names = {}
     try:
         c = db()
-        for tid, tn, yr, cat in c.execute(
-                "SELECT tmdbid,tmdb_name,year,cat FROM media WHERE status='done'").fetchall():
-            if tn: names.add(tn)
-            if tid: ids[int(tid)] = f"已入库{('·'+cat) if cat else ''}"
+        for tid, tn, yr, cat, mty in c.execute(
+                "SELECT tmdbid,tmdb_name,year,cat,mtype FROM media WHERE status='done'").fetchall():
+            if tn: names.setdefault(tn, set()).add(yr or "")
+            if tid:
+                lab = f"已入库{('·'+cat) if cat else ''}"
+                ids[int(tid)] = lab                       # 老兜底:mtype 缺失的历史数据只能按数字认
+                if mty: keys[f"{mty}:{int(tid)}"] = lab    # TMDB 的 movie/tv 是两套独立 id,必须带类型
         c.close()
     except Exception: pass
-    d = {"ids": ids, "names": names}
+    d = {"ids": ids, "keys": keys, "names": names}
     _LIBIX.update(t=time.time(), d=d)
     return d
+
+def owned_label(ix, mtype, tid, name="", year=""):
+    """查某作品是否已入库。优先 mtype:id 精确命中,mtype 缺失的老数据退回纯数字,最后同名+年份兜底。"""
+    if tid:
+        hit = ix["keys"].get(f"{mtype}:{int(tid)}")
+        if hit: return hit
+        # keys 里已登记该 id 的另一种类型 → 说明这是撞号,不是同一部作品,别误标
+        if any(k.endswith(f":{int(tid)}") for k in ix["keys"]): return ""
+        hit = ix["ids"].get(int(tid))
+        if hit: return hit
+    # 同名兜底必须带年份:剧版/影版同名太常见(库里 2003 电影《手机》≠ 2010 电视剧《手机》)
+    yrs = ix["names"].get(name) if name else None
+    if not yrs: return ""
+    year = str(year or "")
+    if not year.isdigit() or not any(y.isdigit() for y in yrs):
+        return "同名已有"                            # 有一边没年份,只能给个弱提示
+    for y in yrs:
+        if y.isdigit() and abs(int(y) - int(year)) <= 1: return "同名已有"
+    return ""
 
 def search_group(q, results, log=lambda m: None):
     """Prowlarr 结果 → 做种过滤 + TMDB 识别分组。log 回调用于搜索过程直播。"""
@@ -2978,7 +3175,7 @@ def search_group(q, results, log=lambda m: None):
             g = groups.setdefault(gk, {"name": m["tmdb_name"], "year": m["year"], "mtype": m["mtype"],
                                        "cat": "anime" if m.get("anime") else m["mtype"],
                                        "poster": m.get("poster",""), "overview": (m.get("overview") or "")[:110],
-                                       "owned": owned["ids"].get(m["id"]) or ("" if m["tmdb_name"] not in owned["names"] else "同名已有"),
+                                       "owned": owned_label(owned, m["mtype"], m["id"], m["tmdb_name"], m["year"]),
                                        "results": []})
             g["results"].append(x)
         else:
@@ -2993,6 +3190,89 @@ def search_group(q, results, log=lambda m: None):
     if other: other = seed_filter(other)
     glist = sorted(allg, key=lambda g: -(g["results"][0]["seeders"] if g["results"] else 0))
     return {"ok": True, "groups": glist, "other": other}
+
+# ============ 人物搜索(演员/导演片单) ============
+# 和片名搜索反着来:片名搜索是「先扫66站→再识别成作品」,人物搜索是「先问 TMDB 要片单→只对你点的那部去搜种」。
+# 一个演员动辄 70+ 部,全部扇出 = 70×66 次站点请求,能把 Prowlarr 和站点都打爆,所以这里绝不预搜种子。
+_DEPT_CN = {"Acting": "演员", "Directing": "导演", "Writing": "编剧", "Production": "制片",
+            "Sound": "音乐", "Camera": "摄影", "Editing": "剪辑", "Art": "美术",
+            "Crew": "剧组", "Costume & Make-Up": "服化", "Visual Effects": "视效"}
+# 主创才算「作品」,场务/助理之类挂名不列
+_CREW_JOBS = {"Director", "Writer", "Screenplay", "Story", "Producer", "Executive Producer",
+              "Novel", "Original Music Composer", "Creator"}
+_CREW_CN = {"Director": "导演", "Writer": "编剧", "Screenplay": "编剧", "Story": "原著",
+            "Producer": "制片", "Executive Producer": "监制", "Novel": "原著",
+            "Original Music Composer": "配乐", "Creator": "创作"}
+
+def tmdb_person_search(q):
+    """搜人名 → 候选人物列表。同名的人不少(实测「王志文」返回 2 个),交给前端让用户点选,不闭眼取第一个。"""
+    if not CFG["TMDB_KEY"]: return []
+    try:
+        rs = _tmdb_call("/search/person", query=q, language="zh-CN", include_adult="false").get("results", [])
+    except Exception as e:
+        logmsg("WARN", f"TMDB 人物搜索失败[{q}]: {e}"); return []
+    out = []
+    for r in rs[:8]:
+        kf = [(k.get("title") or k.get("name") or "") for k in (r.get("known_for") or [])]
+        dp = r.get("known_for_department") or ""
+        out.append({"id": r.get("id"), "name": r.get("name") or "",
+                    "dept": _DEPT_CN.get(dp, dp), "pop": round(r.get("popularity") or 0, 1),
+                    "profile": r.get("profile_path") or "",
+                    "known": " · ".join([x for x in kf if x][:3])})
+    return out
+
+def tmdb_person_credits(pid):
+    """某人的全部影视作品 → 按电影/电视剧分组 + 标注哪些已入库。"""
+    if not CFG["TMDB_KEY"]: return {"ok": False, "err": "未配置 TMDB Key"}
+    try:
+        info = _tmdb_call(f"/person/{pid}", language="zh-CN")
+        cr = _tmdb_call(f"/person/{pid}/combined_credits", language="zh-CN")
+    except Exception as e:
+        return {"ok": False, "err": f"TMDB 取片单失败: {str(e)[:60]}"}
+    ix = library_index()
+    seen = {}
+    def add(x, role, weight):
+        mt = x.get("media_type")
+        if mt not in ("movie", "tv"): return
+        tid = x.get("id")
+        if not tid: return
+        k = f"{mt}:{tid}"
+        g = seen.get(k)
+        if not g:
+            nm = x.get("title") or x.get("name") or ""
+            yr = (x.get("release_date") or x.get("first_air_date") or "")[:4]
+            g = seen[k] = {
+                "id": tid, "mtype": mt, "name": nm, "year": yr,
+                "poster": x.get("poster_path") or "", "overview": (x.get("overview") or "")[:150],
+                "vote": x.get("vote_count") or 0, "pop": round(x.get("popularity") or 0, 1),
+                "eps": x.get("episode_count") or 0, "roles": [], "w": 0,
+                "owned": owned_label(ix, mt, tid, nm, yr)}
+        if role and role not in g["roles"]: g["roles"].append(role)
+        g["w"] = max(g["w"], weight)
+        g["eps"] = max(g["eps"], x.get("episode_count") or 0)
+    for x in (cr.get("cast") or []):
+        add(x, (x.get("character") or "").strip(), 2)
+    for x in (cr.get("crew") or []):
+        job = x.get("job") or ""
+        if job in _CREW_JOBS: add(x, _CREW_CN.get(job, job), 3 if job == "Director" else 1)
+    items = list(seen.values())
+    for g in items:
+        g["role"] = " / ".join(g.pop("roles")[:2])
+        # 没票没热度的多是客串/访谈/未上映,不删(删了容易误伤冷门老剧),标记出来让前端可折叠
+        g["minor"] = g["vote"] < 3 and g["pop"] < 2.0
+    items.sort(key=lambda g: (g["year"] or "0", g["w"], g["vote"]), reverse=True)
+    mv = [g for g in items if g["mtype"] == "movie"]
+    tv = [g for g in items if g["mtype"] == "tv"]
+    own = len([g for g in items if g["owned"]])
+    return {"ok": True,
+            "person": {"id": pid, "name": info.get("name") or "",
+                       "dept": _DEPT_CN.get(info.get("known_for_department") or "",
+                                            info.get("known_for_department") or ""),
+                       "profile": info.get("profile_path") or "",
+                       "bio": (info.get("biography") or "")[:220],
+                       "birth": (info.get("birthday") or "")[:4]},
+            "movie": mv, "tv": tv,
+            "stat": {"total": len(items), "owned": own, "movie": len(mv), "tv": len(tv)}}
 
 def prowlarr_indexers():
     req = urllib.request.Request(CFG["PROWLARR_URL"] + "/api/v1/indexer", headers={"X-Api-Key": CFG["PROWLARR_KEY"]})
@@ -3690,6 +3970,10 @@ class Handler(BaseHTTPRequestHandler):
             s._research(); return
         if s.path.startswith("/torrent"):
             s._detail(); return
+        if s.path.startswith("/api/personcredits"):
+            s._personcredits(); return
+        if s.path.startswith("/api/person"):
+            s._person(); return
         if s.path.startswith("/api/search2"):
             s._search2(); return
         if s.path.startswith("/api/searchstat"):
@@ -3962,6 +4246,17 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             logmsg("WARN", f"搜索下载查询失败[{q}]: {e}"); s._send_json({"ok":False,"err":str(e)[:80]}); return
         s._send_json(search_group(q, results))
+    def _person(s):
+        from urllib.parse import urlparse, parse_qs
+        q = (parse_qs(urlparse(s.path).query).get("q",[""])[0]).strip()
+        if not q: s._send_json({"ok":False,"err":"关键词为空"}); return
+        if not CFG["TMDB_KEY"]: s._send_json({"ok":False,"err":"未配置 TMDB Key,人物搜索用不了"}); return
+        s._send_json({"ok":True,"list":tmdb_person_search(q)})
+    def _personcredits(s):
+        from urllib.parse import urlparse, parse_qs
+        pid = (parse_qs(urlparse(s.path).query).get("id",[""])[0]).strip()
+        if not pid.isdigit(): s._send_json({"ok":False,"err":"人物 id 不合法"}); return
+        s._send_json(tmdb_person_credits(int(pid)))
     def _search2(s):
         from urllib.parse import urlparse, parse_qs
         q = (parse_qs(urlparse(s.path).query).get("q",[""])[0]).strip()
