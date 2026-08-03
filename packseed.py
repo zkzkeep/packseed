@@ -1274,6 +1274,35 @@ def _season_of(s):
         if v and 0 < v < 100: return v
     return None
 
+# 制作组:PT 命名惯例是缀在最后,「-CMCT」「@FRDS」「-52KHD」「[TLF]」都是。
+# 但结尾也可能是分辨率/编码(「-1080p」「-x265」),那些不是组名,得挡掉,
+# 否则一部剧会冒出一堆叫「1080p」的假组,推荐统一就成了笑话。
+_GRPBAD = re.compile(r"""^(?:\d{3,4}p|x26[45]|h26[45]|hevc|avc|aac|ac3|dts(?:hd|ma)?|"""
+                     r"""truehd|flac|ape|wav|web|webrip|webdl|bluray|blu|remux|hdtv|dvd|"""
+                     r"""dvdrip|bdrip|repack|proper|internal|10bit|8bit|hdr|hdr10|sdr|uhd|"""
+                     r"""4k|2160|1080|720|480|mkv|mp4|iso|cd\d?|dis[ck]\d?|part\d?|"""
+                     r"""complete|multi|chs|cht|eng|jpn)$""", re.I)
+_GRP_RE = re.compile(r'(?:[-@＠]|\[)\s*([A-Za-z0-9][A-Za-z0-9_.\-]{1,19})\s*\]?\s*$')
+def _relgrp(t):
+    """从种子名末尾抠制作组,抠不到返回空串(不瞎编)。"""
+    t = re.sub(r'\.(?:mkv|mp4|ts|avi|iso)$', '', (t or "").strip(), flags=re.I)
+    m = _GRP_RE.search(t)
+    if not m: return ""
+    g = m.group(1).strip(" .-_")
+    if not g or _GRPBAD.match(g): return ""
+    if not re.search(r'[A-Za-z]', g): return ""      # 纯数字不是组名
+    return g
+
+def _is_pack(t):
+    """是不是跨季合集。单季整季包不算 —— 那个归它自己那一季,不然「第1季」会空着。"""
+    t = t or ""
+    if _MULTISEASON_RE.search(t): return True
+    if re.search(r'(?:全|共)\s*[0-9一二三四五六七八九十]{1,3}\s*季', t): return True
+    if re.search(r'Complete\s*(?:Series|Collection|Pack)', t, re.I): return True
+    if re.search(r'Season\s*\d{1,2}\s*[-~]\s*\d{1,2}', t, re.I): return True
+    if re.search(r'[0-9一二三四五六七八九十]{1,3}\s*[-~]\s*[0-9一二三四五六七八九十]{1,3}\s*季', t): return True
+    return False
+
 def organize_files(files, m, cat, name_hint=""):
     """files: [(绝对源路径, 相对路径)]；按类型硬链接进媒体库。返回(目标目录, 链接数)
     普通剧/影：只链视频+字幕，拍平到目标目录(Emby 认文件名里的 SxxExx)。
@@ -2968,21 +2997,84 @@ function research(h,el){
   .catch(e=>{toast('触发失败');el.disabled=false;el.textContent='重搜';});
 }
 function toast(m){var t=document.getElementById('toast');t.textContent=m;t.className='show';setTimeout(()=>t.className='',3000);}
+function mkRow(x,rs){
+ var tr=document.createElement('tr');
+ var c1=document.createElement('td');c1.className='sname';c1.title=x.title+'（点击打开站点种子详情页）';
+ if(x.info){var a=document.createElement('a');a.href=x.info;a.target='_blank';a.rel='noreferrer';a.textContent=x.title;a.style.color='var(--fg)';c1.appendChild(a);}
+ else{c1.textContent=x.title;}
+ var cg=document.createElement('td');cg.className='mut';cg.style.fontSize='12px';cg.textContent=x.grp||'—';
+ var c2=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=x.site;c2.appendChild(sp);
+ var c3=document.createElement('td');c3.className='r';c3.textContent=x.sizeh;
+ var c4=document.createElement('td');c4.className='r';c4.textContent=x.seeders;
+ var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x,rs);};c5.appendChild(b);
+ tr.appendChild(c1);tr.appendChild(cg);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tr.appendChild(c5);
+ return tr;
+}
+/* 一部多季的剧,种子是几十条乱序堆在一起的。按季分段、每季内把「推荐制作组」顶到最前,
+   挑起来才不用逐条读文件名。推荐组 = 覆盖季数最多的那个组(平手比总做种数) ——
+   同一个组的画质命名习惯一致,混着下以后 Emby 里会很难看。 */
 function mkTable(rs){
- var tbl=document.createElement('table');
- var hd=document.createElement('tr');hd.innerHTML='<th>标题</th><th>站点</th><th class=r>大小</th><th class=r>做种</th><th></th>';tbl.appendChild(hd);
+ var wrap=document.createElement('div');
+ var packs=[],seasons={},rest=[];
  rs.forEach(function(x){
-  var tr=document.createElement('tr');
-  var c1=document.createElement('td');c1.className='sname';c1.title=x.title+'（点击打开站点种子详情页）';
-  if(x.info){var a=document.createElement('a');a.href=x.info;a.target='_blank';a.rel='noreferrer';a.textContent=x.title;a.style.color='var(--fg)';c1.appendChild(a);}
-  else{c1.textContent=x.title;}
-  var c2=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=x.site;c2.appendChild(sp);
-  var c3=document.createElement('td');c3.className='r';c3.textContent=x.sizeh;
-  var c4=document.createElement('td');c4.className='r';c4.textContent=x.seeders;
-  var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x,rs);};c5.appendChild(b);
-  tr.appendChild(c1);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tr.appendChild(c5);tbl.appendChild(tr);
+  if(x.pack)packs.push(x);
+  else if(x.ss){if(!seasons[x.ss])seasons[x.ss]=[];seasons[x.ss].push(x);}
+  else rest.push(x);
  });
- return tbl;
+ var keys=Object.keys(seasons).map(Number).sort(function(a,b){return a-b;});
+ var grouped=keys.length>=2||(packs.length>0&&keys.length>=1);
+ var cov={},tot={},best='',bn=0;
+ if(grouped){
+  keys.forEach(function(k){
+   var seen={};
+   seasons[k].forEach(function(x){
+    if(!x.grp)return;
+    tot[x.grp]=(tot[x.grp]||0)+x.seeders;
+    if(!seen[x.grp]){seen[x.grp]=1;cov[x.grp]=(cov[x.grp]||0)+1;}
+   });
+  });
+  Object.keys(cov).forEach(function(g){
+   if(cov[g]>bn||(cov[g]==bn&&(tot[g]||0)>(tot[best]||0))){bn=cov[g];best=g;}
+  });
+ }
+ var only=false;
+ function build(){
+  var tbl=document.createElement('table');
+  var hd=document.createElement('tr');
+  hd.innerHTML='<th>标题</th><th>制作组</th><th>站点</th><th class=r>大小</th><th class=r>做种</th><th></th>';
+  tbl.appendChild(hd);
+  if(!grouped){rs.forEach(function(x){tbl.appendChild(mkRow(x,rs));});return tbl;}
+  function sec(label,items){
+   var list=items.filter(function(x){return !only||x.grp==best;});
+   if(!list.length)return;
+   var tr=document.createElement('tr'),td=document.createElement('td');
+   td.colSpan=6;td.style.cssText='padding:9px 16px 3px;font-weight:600;font-size:13px;opacity:.8';
+   td.textContent=label+'（'+list.length+'）';tr.appendChild(td);tbl.appendChild(tr);
+   list.slice().sort(function(a,b){
+    var pa=(best&&a.grp==best)?0:1,pb=(best&&b.grp==best)?0:1;
+    return pa-pb||b.seeders-a.seeders;
+   }).forEach(function(x){tbl.appendChild(mkRow(x,rs));});
+  }
+  sec('📦 合集 / 跨季包',packs);
+  keys.forEach(function(k){sec('第 '+k+' 季',seasons[k]);});
+  sec('· 判不出季的',rest);
+  return tbl;
+ }
+ if(grouped&&best){
+  var tip=document.createElement('div');tip.className='mut';
+  tip.style.cssText='padding:4px 16px 6px;font-size:12px';
+  var ts=document.createElement('span');
+  ts.textContent='建议统一用 '+best+'（覆盖 '+bn+'/'+keys.length+' 季，已顶到每季最前）　';
+  var tb=document.createElement('button');tb.className='dlbtn';
+  tb.style.cssText='padding:2px 9px;font-size:12px';tb.textContent='只看 '+best;
+  tb.onclick=function(){
+   only=!only;tb.textContent=(only?'看全部':'只看 '+best);
+   wrap.replaceChild(build(),wrap.lastChild);
+  };
+  tip.appendChild(ts);tip.appendChild(tb);wrap.appendChild(tip);
+ }
+ wrap.appendChild(build());
+ return wrap;
 }
 var _sd=null,_sf='';   /* _sf = 当前这批结果是用哪个类型范围搜回来的 */
 var FCN={movie:'电影',tv:'电视剧',anime:'动漫',book:'漫画/书',music:'音乐'};
@@ -3847,9 +3939,12 @@ def search_group(q, results, log=lambda m: None, anchor=None):
     for r in results:
         url = r.get("downloadUrl") or r.get("guid") or ""
         if not url: continue
-        out.append({"title": r.get("title",""), "site": r.get("indexer",""),
+        _t = r.get("title", "")
+        _pk = _is_pack(_t)
+        out.append({"title": _t, "site": r.get("indexer",""),
                     "sizeh": human_size(r.get("size",0)), "size": r.get("size",0), "seeders": r.get("seeders") or 0,
-                    "url": url, "cat": catlab(r), "info": r.get("infoUrl") or ""})
+                    "url": url, "cat": catlab(r), "info": r.get("infoUrl") or "",
+                    "ss": 0 if _pk else (_season_of(_t) or 0), "grp": _relgrp(_t), "pack": _pk})
     out.sort(key=lambda x: x["seeders"], reverse=True)
     out = out[:100]
     # 音乐走 iTunes 识别(TMDB不管音乐)，其余走 TMDB
