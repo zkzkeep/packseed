@@ -1099,8 +1099,13 @@ def tmdb_by_id(tid, mtype_hint=""):
         try:
             d = _tmdb_call(f"/{mt}/{tid}", language="zh-CN")
             if d.get("id"):
+                # 详情接口给的是 genres 对象数组(不是搜索接口的 genre_ids),16=动画。
+                # 不带这个字段的话,手动改识别的动漫会漏判成电视剧、进错库。
+                anime = any(g.get("id") == 16 for g in (d.get("genres") or []))
                 return {"mtype":mt,"id":d["id"],"tmdb_name":(d.get("name") or d.get("title")),
-                        "year":(d.get("first_air_date") or d.get("release_date") or "")[:4],"conf":"manual","q":str(tid)}
+                        "year":(d.get("first_air_date") or d.get("release_date") or "")[:4],
+                        "conf":"manual","q":str(tid),"anime":anime,
+                        "poster":d.get("poster_path") or "","overview":d.get("overview") or ""}
         except Exception: pass
     return None
 
@@ -1228,6 +1233,10 @@ def media_category(name, m):
     """qb 分类：音乐 > 动漫 > 电视剧 > 电影"""
     if meta_is_music(name): return "音乐"
     if meta_is_anime(name): return "动漫"
+    # 光看种子名不够:欧美式发布名(如 Natsume's.Book.of.Friends.S05.2016.1080p.CR.WEB-DL)
+    # 没有任何字幕组标记,meta_is_anime 认不出来,夏目友人帐/灌篮高手 就这么全进了剧集库。
+    # TMDB 早就知道它是 genre 16(动画),这里直接采信。
+    if m and m.get("anime"): return "动漫"
     if m: return "电视剧" if m["mtype"]=="tv" else "电影"
     return "电视剧" if meta_is_tv(name) else "电影"
 
@@ -1243,7 +1252,29 @@ def walk_files(path):
 # ============ 整理入库（硬链接） + 转种 + 通知 Emby ============
 def _safe(s): return re.sub(r'[\\/:*?"<>|]+',' ',(s or "")).strip()
 
-def organize_files(files, m, cat):
+_SEASON_RE     = re.compile(r'S(\d{1,2})\s?E\d{1,3}', re.I)                      # S05E03
+_SEASONPACK_RE = re.compile(r'(?:^|[.\s_\-\[（(])S(\d{1,2})(?![0-9EeXxPp])', re.I)  # 整季包 .S05.
+_MULTISEASON_RE= re.compile(r'S\d{1,2}\s*[-~]\s*S?\d{1,2}', re.I)                # S01-S03 跨季包
+def _season_of(s):
+    """从文件名/目录名/种子名里抠季号,抠不到返回 None（不瞎猜第 1 季）。
+       识别三种写法:SxxExx 单集、Sxx 整季包、Season N / 第N季。
+       跨季包(S01-S03)返回 None —— 它横跨好几季,只能靠每个文件自己的 SxxExx 定位,
+       在这里猜一个季号会把三季文件全塞进 Season 01。"""
+    s = s or ""
+    mm = _SEASON_RE.search(s)
+    if mm: return int(mm.group(1))
+    if _MULTISEASON_RE.search(s): return None
+    mm = _SEASONPACK_RE.search(s)
+    if mm:
+        v = int(mm.group(1))
+        if 0 < v < 100: return v
+    mm = re.search(r'(?:Season|第)\s*([0-9一二三四五六七八九十]{1,3})\s*[季]?', s, re.I)
+    if mm:
+        v = _cn_num(mm.group(1))
+        if v and 0 < v < 100: return v
+    return None
+
+def organize_files(files, m, cat, name_hint=""):
     """files: [(绝对源路径, 相对路径)]；按类型硬链接进媒体库。返回(目标目录, 链接数)
     普通剧/影：只链视频+字幕，拍平到目标目录(Emby 认文件名里的 SxxExx)。
     蓝光/DVD原盘(BDMV/VIDEO_TS)：完整保留目录结构、不过滤文件，Emby 才能当原盘碟识别。"""
@@ -1262,7 +1293,15 @@ def organize_files(files, m, cat):
         else:
             if os.path.splitext(rel)[1].lower() not in _VIDEO_EXT and not rel.lower().endswith((".srt",".ass",".sub")):
                 continue
-            dst = os.path.join(dest_dir, os.path.basename(rel))
+            base = os.path.basename(rel)
+            # 剧集按季分子目录(Emby 标准结构)。原来是全部拍平在剧集根目录 ——
+            # 单季没问题,但多季陆续下载时 7 季一百多个文件混在一起,Emby 认季就容易出岔子,
+            # 人也没法一眼看出哪季齐了。季号优先从文件名的 SxxExx 取,取不到再看种子名。
+            if m and m.get("mtype") == "tv":
+                ss = _season_of(base) or _season_of(rel) or meta_season(name_hint or "") or 1
+                dst = os.path.join(dest_dir, f"Season {ss:02d}", base)
+            else:
+                dst = os.path.join(dest_dir, base)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         if os.path.exists(dst): n += 1; continue
         try:
@@ -1449,8 +1488,13 @@ def scrape_pack(dest, m):
                   [("title", d.get("name") or m["tmdb_name"]), ("plot", plot), ("year", year),
                    ("premiered", d.get("first_air_date","")), ("rating", rating), ("tmdbid", tid)], genres, (uid,))
         season_cache = {}
-        for f in sorted(os.listdir(dest)):
-            fp = os.path.join(dest, f)
+        # 剧集现在按 Season XX 分子目录存放,所以要递归遍历;
+        # 老库里平铺在根目录的文件同样能扫到,两种结构都兼容。
+        targets = []
+        for dp, _dn, fns in os.walk(dest):
+            for f in sorted(fns): targets.append((dp, f))
+        for dp, f in targets:
+            fp = os.path.join(dp, f)
             if not os.path.isfile(fp): continue
             stem, ext = os.path.splitext(f)
             is_video = ext.lower() in _VIDEO_EXT; is_sub = ext.lower() in (".srt",".ass",".sub")
@@ -1460,15 +1504,20 @@ def scrape_pack(dest, m):
             else:
                 m2 = _EP_RE.search(stem)
                 if not m2: continue
-                ss, ee = 1, int(m2.group(1))
+                # 文件名里没写季号:优先信它所在的 Season XX 目录,再退回第 1 季。
+                # 直接假定第 1 季是老毛病 —— 番组命名(如「夏目友人帐 [01]」)全会被打成 S01。
+                ss = _season_of(os.path.basename(dp)) or 1
+                ee = int(m2.group(1))
             newstem = f"{title} - S{ss:02d}E{ee:02d}"
             newf = newstem + ext
+            # 落点跟着文件走:文件在 Season 05/ 里,改名和 nfo 就都留在 Season 05/,
+            # 不能写回剧集根目录,否则视频和它的 nfo 会分家
             if f != newf:
-                np = os.path.join(dest, newf)
+                np = os.path.join(dp, newf)
                 if os.path.exists(np): newstem = stem
                 else: os.rename(fp, np)
             if is_video:
-                nfop = os.path.join(dest, newstem + ".nfo")
+                nfop = os.path.join(dp, newstem + ".nfo")
                 if os.path.exists(nfop): continue
                 if ss not in season_cache: season_cache[ss] = tmdb_details("tv", tid, season=ss)
                 eps = {e.get("episode_number"): e for e in (season_cache[ss].get("episodes") or [])}
@@ -1541,7 +1590,7 @@ def do_organize(ih, name, files, m, cat):
     c.execute("INSERT OR REPLACE INTO media(info_hash,name,cat,mtype,tmdbid,tmdb_name,year,target,conf,status,files,ts,poster) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
               (ih, name, cat, m["mtype"], m["id"], m["tmdb_name"], m["year"], "", m["conf"], "processing", len(files), int(time.time()), m.get("poster") or ""))
     c.commit(); c.close()
-    dest, n = organize_files(files, m, cat)
+    dest, n = organize_files(files, m, cat, name_hint=name)
     try:
         scrape_pack(dest, m)      # 自给自足刮削包: nfo+图+标准命名,不依赖播放器刮削
     except Exception as e:
@@ -1771,6 +1820,16 @@ def qb_watcher():
 
 # ============ Prowlarr ============
 def prowlarr_search(query, cats=None):
+    """聚合接口:一次问全部站点,**等到最慢的站也回来为止**(timeout=150)。
+
+    ⚠️ 辅种专用,别拿 prowlarr_search_fan 替换它。两条路的目标是相反的:
+       · 搜索(交互) → 用 fan 版:动态收网、丢慢站、按类型筛站、只等主力站。
+                      人在等结果,少而精、快才是对的。
+       · 辅种(后台) → 用本函数:不筛类型、不丢任何站、慢站也等。
+                      **覆盖面就是种子的存活率** —— 少辅一个站就少一份保活,
+                      而且后台跑没人等,慢一点毫无代价。
+    实测:辅种累计覆盖 50 个站,单个内容平均辅到 18 个站(大明王朝1566 达 42 站)。
+    """
     u = CFG["PROWLARR_URL"] + "/api/v1/search?query=" + urllib.parse.quote(query) + "&type=search"
     for c in (cats or []):          # Torznab 分类: 2000影 5000剧 5070动漫 7030漫画 3000音乐
         u += "&categories=" + str(c)
@@ -2273,7 +2332,9 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 </div>
 </div>
 <div class=card id=dbshelf><h2>🎞 豆瓣经典榜 <span class=mut style=font-weight:400>· 按豆瓣评分排的高分经典 · 点海报直接全站找源,选个站就能下</span><span class=dbsrc id=dbsrc></span>
-<button class=dlbtn style="padding:4px 13px;font-size:12px;margin-left:8px" onclick=dbMore()>换一批</button></h2>
+<button class=dlbtn style="padding:4px 13px;font-size:12px;margin-left:8px" onclick=dbMore()>换一批</button>
+<button class=dlbtn style="padding:4px 13px;font-size:12px;margin-left:6px" onclick=batchOpen()>📦 批量下载本榜</button></h2>
+<div id=batchbox style="padding:0 20px 12px;display:none"></div>
 <div class=dbtabs id=dbtabs></div>
 <div class=dbflow><div class=dbtrack id=dbtrack><span class=mut style=padding:12px>载入中…</span></div></div></div>
 <div id=sresult></div>
@@ -2289,6 +2350,9 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 <div id=wk-head></div><div id=wk-body></div></div></div>
 </div>
 <div id=tab-media class=tab>
+<div class=card><h2>🩺 媒体库体检 <span class=mut style=font-weight:400>· 查分类错放/季目录缺失 —— 这两类毛病会持续产生,别等发现了再翻库</span>
+<button class=dlbtn style="padding:5px 16px;font-size:12px;margin-left:8px" onclick="libAudit(this)">开始体检</button></h2>
+<div id=libaudit style="padding:2px 20px 14px"><span class=mut>点「开始体检」扫描媒体库</span></div></div>
 <div class=card><h2>📥 整理入库 <span class=mut style=font-weight:400>· 下载完成自动识别→硬链接进 Emby 媒体库 · 按分类陈列 · 待确认的可手动填 TMDB id/片名</span></h2>
 <div class=libbar><input id=libq placeholder="🔍 查查库里有没有 —— 输片名,下载前先确认别重复" oninput="libFind()">
 <span class=mut id=libmsg>共 {{MEDIACOUNT}} 项</span></div>{{MEDIA}}</div>
@@ -2399,8 +2463,10 @@ var _of=window.fetch;   // 会话过期(401)自动送回登录页,不再半死�
 window.fetch=function(){return _of.apply(this,arguments).then(function(r){
  if(r.status==401){location.href='/login';}
  return r;});};
+var _noReload=false;   // 有体检结果这类"看完才有用"的内容时置位,挡住自动刷新
 function armReload(t){
  clearTimeout(_t);_t=null;
+ if(_noReload)return;   // 结果还在屏幕上,别把人家正在看/正在复制的东西刷没了
  if(t=='seed'||t=='media'||t=='logs')_t=setTimeout(()=>location.reload(),20000);  // 只有表格页才自动刷新
 }
 var _curTab='search';
@@ -3324,6 +3390,198 @@ function dl(b,x,rs){
   else{b.textContent='失败';b.disabled=false;toast('下载失败：'+(d.err||''));}
  }).catch(e=>{b.textContent='失败';b.disabled=false;toast('下载出错');});
 }
+function batchOpen(){
+ var b=document.getElementById('batchbox');
+ if(b.style.display!='none'){b.style.display='none';return;}
+ b.style.display='block';b.innerHTML='';
+ var lab=DBS.filter(function(x){return x[0]==_dbcol;}).map(function(x){return x[1];})[0]||_dbcol;
+ var c=document.createElement('div');c.className='cachetip';c.style.marginLeft='0';
+ var t=document.createElement('span');
+ t.textContent='从「'+lab+'」批量下载：只搜几个大站选最优版本，下完由后台辅种铺到全部站点。';
+ var sel=document.createElement('select');sel.style.cssText='margin:0 6px;padding:3px 8px;border-radius:8px';
+ [25,50,100,250].forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent='前 '+n+' 部';sel.appendChild(o);});
+ var k=document.createElement('label');k.style.cssText='font-size:12px;margin-right:8px';
+ var kb=document.createElement('input');kb.type='checkbox';kb.style.marginRight='4px';
+ k.appendChild(kb);k.appendChild(document.createTextNode('优先 4K'));
+ var go=document.createElement('button');go.textContent='开始扫描';
+ go.onclick=function(){batchPlan(sel.value,kb.checked?1:0,go);};
+ c.appendChild(t);c.appendChild(sel);c.appendChild(k);c.appendChild(go);b.appendChild(c);
+ var d=document.createElement('div');d.id='batchres';b.appendChild(d);
+}
+function batchPlan(n,k,btn){
+ _noReload=true;clearTimeout(_t);_t=null;
+ btn.disabled=true;btn.textContent='扫描中…';
+ var box=document.getElementById('batchres');
+ box.innerHTML='<div class=mut id=bpTip>准备中…</div>';
+ fetch('/api/batchplan?col='+_dbcol+'&n='+n+'&k='+k).then(r=>r.json()).then(function(d){
+  if(!d.ok){box.innerHTML='<div class=mut>提交失败：'+(d.err||'')+'</div>';btn.disabled=false;btn.textContent='开始扫描';return;}
+  batchPoll(d.id,box,btn);
+ }).catch(function(){box.innerHTML='<div class=mut>提交出错</div>';btn.disabled=false;btn.textContent='开始扫描';});
+}
+function batchPoll(id,box,btn){
+ fetch('/api/batchstat?id='+id).then(r=>r.json()).then(function(j){
+  if(!j.ok){box.innerHTML='<div class=mut>'+(j.err||'任务丢失')+'</div>';btn.disabled=false;btn.textContent='开始扫描';return;}
+  if(!j.fin){
+   var e=document.getElementById('bpTip');
+   if(e)e.textContent='扫描中 '+j.done+'/'+j.total+' —— 正在查「'+(j.cur||'')+'」（每部约 10 秒，可以先干别的）';
+   setTimeout(function(){batchPoll(id,box,btn);},1500);return;
+  }
+  btn.disabled=false;btn.textContent='重新扫描';
+  batchRender(j.rows||[],box);
+ }).catch(function(){setTimeout(function(){batchPoll(id,box,btn);},3000);});
+}
+function batchRender(rows,box){
+ box.innerHTML='';
+ var can=rows.filter(function(r){return r.url;});
+ var skip=rows.filter(function(r){return !r.url;});
+ var head=document.createElement('div');head.className='gt';head.style.margin='8px 0 6px';
+ head.textContent='可下载 '+can.length+' 部 · 跳过 '+skip.length+' 部';box.appendChild(head);
+ var tb=document.createElement('table');
+ var hr=document.createElement('tr');
+ ['','片名','评分','选中的版本','站点','大小','做种'].forEach(function(h){
+  var th=document.createElement('th');th.textContent=h;hr.appendChild(th);});
+ tb.appendChild(hr);
+ can.forEach(function(r){
+  var tr=document.createElement('tr');
+  var c0=document.createElement('td');
+  var cb=document.createElement('input');cb.type='checkbox';cb.checked=true;cb.dataset.i=rows.indexOf(r);
+  cb.className='bsel';c0.appendChild(cb);
+  var c1=document.createElement('td');c1.textContent=r.title+(r.year?' ('+r.year+')':'');
+  var c2=document.createElement('td');c2.className='mut';c2.textContent=r.rate?('★'+r.rate):'';
+  var c3=document.createElement('td');c3.className='sname';c3.title=r.rel;c3.textContent=r.rel;
+  if(r.noxfer){var w=document.createElement('span');w.className='mut';w.style.color='#FFD400';
+   w.textContent=' [禁转]';c3.appendChild(w);}
+  var c4=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=r.site;c4.appendChild(sp);
+  var c5=document.createElement('td');c5.className='r';c5.textContent=r.size;
+  var c6=document.createElement('td');c6.className='r';c6.textContent=r.seeders;
+  [c0,c1,c2,c3,c4,c5,c6].forEach(function(x){tr.appendChild(x);});
+  tb.appendChild(tr);
+ });
+ box.appendChild(tb);
+ if(skip.length){
+  var sh=document.createElement('div');sh.className='gt';sh.style.margin='12px 0 6px';
+  sh.textContent='跳过的';box.appendChild(sh);
+  var st=document.createElement('table');
+  skip.forEach(function(r){
+   var tr=document.createElement('tr');
+   var a=document.createElement('td');a.textContent=r.title+(r.year?' ('+r.year+')':'');
+   var b2=document.createElement('td');b2.className='mut';b2.textContent=r.skip||'';
+   tr.appendChild(a);tr.appendChild(b2);st.appendChild(tr);});
+  box.appendChild(st);
+ }
+ if(can.length){
+  var bar=document.createElement('div');bar.style.marginTop='12px';
+  var all=document.createElement('button');all.className='dlbtn';all.style.marginRight='8px';
+  all.textContent='全选/全不选';
+  all.onclick=function(){var cs=document.querySelectorAll('.bsel');var v=!cs[0].checked;
+   cs.forEach(function(x){x.checked=v;});};
+  var go=document.createElement('button');go.className='dlbtn';
+  go.textContent='推送到 qb 下载';
+  go.onclick=function(){
+   var picked=[];document.querySelectorAll('.bsel').forEach(function(x){
+    if(x.checked)picked.push(rows[parseInt(x.dataset.i)]);});
+   if(!picked.length){toast('一部都没选');return;}
+   go.disabled=true;go.textContent='推送中…（每部间隔 2 秒）';
+   fetch('/api/batchgo',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rows:picked})}).then(r=>r.json()).then(function(d){
+     go.textContent=d.ok?('✅ 已推送 '+d.added+' 部'+(d.failed?('，失败 '+d.failed):'')):'推送失败';
+     toast(d.ok?('已推送 '+d.added+' 部到 qb，去「下载管理」看进度'):(d.err||'失败'));
+    }).catch(function(){go.disabled=false;go.textContent='推送到 qb 下载';toast('推送出错');});
+  };
+  bar.appendChild(all);bar.appendChild(go);box.appendChild(bar);
+  var note=document.createElement('div');note.className='mut';note.style.cssText='margin-top:6px;font-size:12px';
+  note.textContent='下载完会自动识别→硬链接进媒体库→转种到 tr→后台辅种铺开到几十个站。[禁转] 标记的种不会被转出去，但正常做种。';
+  box.appendChild(note);
+ }
+}
+function libAudit(btn){
+ var box=document.getElementById('libaudit');
+ if(btn){btn.disabled=true;btn.textContent='体检中…';}
+ _noReload=true; clearTimeout(_t); _t=null;   /* 挡住本页 20 秒一次的整页重载 */
+ var t0=Date.now();
+ box.innerHTML='<span class=mut id=laTip>扫描中…首次要问 TMDB 每部片的类型，约十几秒</span>';
+ var tick=setInterval(function(){var e=document.getElementById('laTip');
+  if(e)e.textContent='扫描中…已等 '+Math.round((Date.now()-t0)/1000)+' 秒（首次要问 TMDB 每部片的类型）';},1000);
+ fetch('/api/libaudit?force=1').then(r=>r.json()).then(function(d){
+  clearInterval(tick);
+  if(btn){btn.disabled=false;btn.textContent='重新体检';}
+  if(!d.ok){box.innerHTML='<span class=mut>体检失败：'+(d.err||'')+'</span>';return;}
+  box.innerHTML='';
+  var wc=d.wrong_cat||[],fl=d.flat||[],uk=d.unknown||[],ms=d.missing||[];
+  var lock=document.createElement('div');lock.className='cachetip';lock.style.marginLeft='0';
+  var lt=document.createElement('span');lt.textContent='📌 已暂停本页的自动刷新，结果不会自己消失。看完点右边恢复。';
+  var lb=document.createElement('button');lb.textContent='恢复自动刷新';
+  lb.onclick=function(){_noReload=false;armReload('media');lock.remove();};
+  lock.appendChild(lt);lock.appendChild(lb);box.appendChild(lock);
+  var sum=document.createElement('div');sum.className='mut';sum.style.marginBottom='10px';
+  sum.textContent='共 '+d.total+' 部 · 分类错放 '+wc.length+' · 季目录缺失 '+fl.length+' · 待人工确认 '+uk.length+' · 目录丢失 '+ms.length;
+  box.appendChild(sum);
+  function sec(title,items,render){
+   if(!items.length)return;
+   var h=document.createElement('div');h.className='gt';h.style.margin='10px 0 6px';h.textContent=title;box.appendChild(h);
+   var t=document.createElement('table');
+   items.forEach(function(x){var tr=document.createElement('tr');render(tr,x);t.appendChild(tr);});
+   box.appendChild(t);
+  }
+  sec('❌ 分类错放（会被自动修正）',wc,function(tr,x){
+   var a=document.createElement('td');a.textContent=x.name;
+   var b=document.createElement('td');b.className='mut';b.textContent=x.why;
+   var c2=document.createElement('td');c2.className='mut';c2.style.fontSize='12px';c2.textContent=x.target+' → '+x.to;
+   tr.appendChild(a);tr.appendChild(b);tr.appendChild(c2);});
+  sec('📁 季目录缺失（会被自动修正）',fl,function(tr,x){
+   var a=document.createElement('td');a.textContent=x.name;
+   var b=document.createElement('td');b.className='mut';
+   var ks=Object.keys(x.seasons).map(function(k){return k=='0'?('无季号 '+x.seasons[k]+'个'):('S'+k+' '+x.seasons[k]+'个');});
+   b.textContent=ks.join('  ');
+   tr.appendChild(a);tr.appendChild(b);});
+  sec('❓ 待人工确认（自动判不了，不硬来）',uk,function(tr,x){
+   var a=document.createElement('td');a.textContent=x.name;
+   var b=document.createElement('td');b.className='mut';
+   b.textContent=x.why?x.why:('TMDB 条目没填类型（tmdbid '+x.tmdbid+'）');
+   var c3=document.createElement('td');
+   if(!x.why){   // 只有「TMDB没类型」这种才提供手动归类;命名太乱那种得先理文件
+    ['动漫','电视剧','电影'].forEach(function(cn){
+     var bt=document.createElement('button');bt.className='dlbtn';
+     bt.style.cssText='padding:3px 10px;font-size:12px;margin-right:6px';
+     bt.textContent='归为'+cn;
+     bt.onclick=function(){libSetCat(x.target,cn,bt);};
+     c3.appendChild(bt);});
+   }
+   tr.appendChild(a);tr.appendChild(b);tr.appendChild(c3);});
+  sec('⚠️ 目录丢失',ms,function(tr,x){
+   var a=document.createElement('td');a.textContent=x.name;
+   var b=document.createElement('td');b.className='mut';b.textContent=x.target;
+   tr.appendChild(a);tr.appendChild(b);});
+  if(wc.length||fl.length){
+   var f=document.createElement('button');f.className='dlbtn';f.style.margin='12px 0 0';
+   f.textContent='一键修正（'+(wc.length+fl.length)+' 项）';
+   f.onclick=function(){libFix(f);};box.appendChild(f);
+   var note=document.createElement('div');note.className='mut';note.style.marginTop='6px';note.style.fontSize='12px';
+   note.textContent='媒体库文件是硬链接，移动只改目录项不动数据，做种不受影响。修完记得在 Emby 里扫描一次媒体库。';
+   box.appendChild(note);
+  }else if(!uk.length&&!ms.length){
+   var okd=document.createElement('div');okd.textContent='✅ 媒体库很干净，没发现问题';box.appendChild(okd);
+  }
+ }).catch(function(e){clearInterval(tick);
+  if(btn){btn.disabled=false;btn.textContent='重试体检';}
+  box.innerHTML='<span class=mut>请求失败（'+e+'）。若是超时，再点一次——类型已缓存，第二次很快。</span>';});
+}
+function libSetCat(target,cat,btn){
+ btn.disabled=true;btn.textContent='处理中…';
+ fetch('/api/libcat?target='+encodeURIComponent(target)+'&cat='+encodeURIComponent(cat))
+  .then(r=>r.json()).then(function(d){
+   if(d.ok){toast('已归为'+cat+'，并搬到 '+d.to);libAudit(null);}
+   else{toast('失败：'+(d.err||''));btn.disabled=false;btn.textContent='归为'+cat;}
+  }).catch(function(){toast('请求出错');btn.disabled=false;btn.textContent='归为'+cat;});
+}
+function libFix(btn){
+ btn.disabled=true;btn.textContent='修正中…';
+ fetch('/api/libfix').then(r=>r.json()).then(function(d){
+  if(!d.ok){toast('修正失败：'+(d.err||''));btn.disabled=false;btn.textContent='一键修正';return;}
+  toast('已搬库 '+d.moved+' 部、分季 '+d.seasoned+' 部'+((d.errs||[]).length?('，'+d.errs.length+' 项有问题'):''));
+  libAudit(null);
+ }).catch(function(){toast('修正出错');btn.disabled=false;btn.textContent='一键修正';});
+}
 function reid(h,el){
  var inp=el.parentNode.querySelector('input');var v=inp.value.trim();
  if(!v){inp.focus();return;}
@@ -3434,6 +3692,13 @@ def library_index():
     _LIBIX.update(t=time.time(), d=d)
     return d
 
+_SEASON_SUFFIX = re.compile(r'\s*第[0-9一二三四五六七八九十百]+[季部]\s*$')
+def _strip_season(t):
+    """剥掉标题尾部的季号:「老友记 第十季」→「老友记」。
+       豆瓣剧集榜按季收录,库里存的是剧集级身份,不剥就永远对不上。"""
+    t = (t or "").replace("  ", " ").strip()
+    return _SEASON_SUFFIX.sub("", t).strip() or t
+
 def owned_label(ix, mtype, tid, name="", year=""):
     """查某作品是否已入库。优先 mtype:id 精确命中,mtype 缺失的老数据退回纯数字,最后同名+年份兜底。"""
     if tid:
@@ -3445,6 +3710,16 @@ def owned_label(ix, mtype, tid, name="", year=""):
         if hit: return hit
     # 同名兜底必须带年份:剧版/影版同名太常见(库里 2003 电影《手机》≠ 2010 电视剧《手机》)
     yrs = ix["names"].get(name) if name else None
+    if not yrs and name and len(name) >= 3:
+        # 兜底:库里可能存成「猫和老鼠（五十周年纪念版）157集」,豆瓣只叫「猫和老鼠」。
+        # 只认「短名 + 括号补充说明」这一种形式 —— 单纯的前缀匹配会把
+        # 「三国演义」误配到「三国演义3D」,那是两部不同的剧。
+        # 宁可漏判也不能误判:误判会让批量下载**跳过**你其实没有的片子。
+        for k, v in ix["names"].items():
+            if not k or len(k) < 3: continue
+            a, b = (name, k) if len(name) <= len(k) else (k, name)
+            if b.startswith(a) and b[len(a):].lstrip()[:1] in ("（", "(", "【", "[", "「"):
+                yrs = v; break
     if not yrs: return ""
     year = str(year or "")
     if not year.isdigit() or not any(y.isdigit() for y in yrs):
@@ -3712,10 +3987,115 @@ def douban_shelf(col, start=0, count=24):
     ix = library_index()
     out = []
     for it in items:
-        x = dict(it); x["owned"] = owned_label(ix, "", 0, x["title"], x.get("year") or "")
+        x = dict(it)
+        # 豆瓣榜按「季」收录:标题是「老友记 第十季」、年份是那一季的 2003,
+        # 而库里存的是剧集级的「老友记」+ 首播年 1994 —— 名字和年份双双对不上,
+        # 直接比对会把满库的剧全标成"没有"。所以:剥掉季号,并且带季号时不比年份。
+        base = _strip_season(x["title"])
+        x["owned"] = owned_label(ix, "", 0, base,
+                                 "" if base != x["title"] else (x.get("year") or ""))
         out.append(x)
     return {"ok": True, "col": col, "src": src, "start": start,
             "label": DOUBAN_COLS[col][0], "items": out}
+
+# ============ 榜单批量下载 ============
+# 为什么是「一部一个种」而不是「一个大包」:
+#   ① 大包一个 TMDB 身份套几百部,识别必错,包内文件名不规范时事后拆不动(用户吃过这个亏);
+#   ② **辅种覆盖面**:大包只有存了同一个包的站能辅,单片各站都有,能铺到几十个站 —— 覆盖面就是存活率;
+#   ③ 已有的能跳过,不重复占空间;出问题单片重下即可。
+# 搜索只问几个大站(少而精,一部片只需要一个好种),覆盖面交给后台辅种全站铺开。
+
+CFG.setdefault("BATCH_SITES", os.environ.get("BATCH_SITES", "Keep Friends,M-Team,HDSky,OurBits,HDHome"))
+CFG.setdefault("BATCH_MIN_GB", float(os.environ.get("BATCH_MIN_GB", "2")))
+CFG.setdefault("BATCH_MAX_GB", float(os.environ.get("BATCH_MAX_GB", "25")))
+
+_BJOBS = {}
+
+def _pick_release(results, prefer_4k=False):
+    """从一堆候选里挑一个最适合收藏的。规则(按优先级):
+       ① 体积落在 BATCH_MIN_GB~MAX_GB 之间 —— 太小是渣画质,太大是原盘/REMUX 不适合批量囤;
+       ② 做种数越多越好 —— 既下得快,也说明是公认的好版本;
+       ③ 同做种数下优先 x265/HEVC(同画质体积小)。
+       返回 None 表示这批候选都不合适,宁可不下也不下垃圾。"""
+    lo, hi = CFG["BATCH_MIN_GB"] * 1024**3, CFG["BATCH_MAX_GB"] * 1024**3
+    cand = []
+    for r in results:
+        sz = r.get("size") or 0
+        if not (lo <= sz <= hi): continue
+        t = r["title"].lower()
+        score = (r.get("seeders") or 0)
+        if "x265" in t or "hevc" in t: score += 30
+        if prefer_4k and ("2160p" in t or "4k" in t): score += 200
+        elif not prefer_4k and "1080p" in t: score += 50
+        cand.append((score, r))
+    if not cand: return None
+    cand.sort(key=lambda x: -x[0])
+    return cand[0][1]
+
+def _bjob_run(jid, col, total, prefer_4k):
+    job = _BJOBS[jid]
+    sites = [x for x in CFG["BATCH_SITES"].split(",") if x.strip()]
+    ix = library_index()
+    done = 0
+    try:
+        items = []
+        start = 0
+        while len(items) < total:
+            d = douban_shelf(col, start, min(50, total - len(items)))
+            got = d.get("items") or []
+            if not got: break
+            items.extend(got); start += len(got)
+        items = items[:total]
+        job["total"] = len(items)
+        for it in items:
+            if job.get("stop"): break
+            done += 1; job["done"] = done
+            job["cur"] = it["title"]
+            owned = owned_label(ix, "", 0, it["title"], it.get("year") or "")
+            if owned:
+                job["rows"].append({"title": it["title"], "year": it.get("year") or "",
+                                    "rate": it.get("rate") or "", "skip": "库里已有"})
+                continue
+            q = it["title"] + ((" " + it["year"]) if it.get("year") else "")
+            try:
+                name, year = split_query(q)
+                anchor = query_anchor(name, year, "movie")
+                res = prowlarr_search_fan([name], cats=FILTER_CATS["movie"], only=sites)
+                g = search_group(q, res, anchor=anchor)
+                grp = next((x for x in (g.get("groups") or []) if x.get("anchor")), None)
+                pick = _pick_release(grp["results"], prefer_4k) if grp else None
+            except Exception as e:
+                job["rows"].append({"title": it["title"], "year": it.get("year") or "",
+                                    "rate": it.get("rate") or "", "skip": f"搜索出错:{type(e).__name__}"})
+                continue
+            if not pick:
+                job["rows"].append({"title": it["title"], "year": it.get("year") or "",
+                                    "rate": it.get("rate") or "",
+                                    "skip": f"没有 {CFG['BATCH_MIN_GB']:g}~{CFG['BATCH_MAX_GB']:g}GB 的合适版本"})
+                continue
+            job["rows"].append({"title": it["title"], "year": it.get("year") or "",
+                                "rate": it.get("rate") or "", "tmdb": grp["name"],
+                                "rel": pick["title"], "site": pick["site"], "size": pick["sizeh"],
+                                "seeders": pick["seeders"], "url": pick["url"],
+                                "noxfer": noxfer(pick["title"])})
+            time.sleep(1.2)     # 节流:别把站点当压测靶子
+    except Exception as e:
+        job["err"] = str(e)[:120]
+    job["fin"] = True
+
+def batch_download(rows):
+    """把选中的种子推给 qb。逐个加、留间隔 —— 一秒钟几十个下载请求会被站点盯上。"""
+    ok = fail = 0; errs = []
+    for r in rows:
+        try:
+            data = prowlarr_download(r["url"])
+            qb_conn().add(data, category=CFG["QB_CATEGORY"] or "电影")
+            ok += 1
+            logmsg("INFO", f"榜单批量 → qb: {r.get('title','')} | {r.get('rel','')[:40]}")
+        except Exception as e:
+            fail += 1; errs.append(f"{r.get('title','?')}: {str(e)[:40]}")
+        time.sleep(CFG["SNATCH_DELAY"] or 2)
+    return {"ok": True, "added": ok, "failed": fail, "errs": errs[:8]}
 
 # ============ 人物搜索(演员/导演片单) ============
 # 和片名搜索反着来:片名搜索是「先扫66站→再识别成作品」,人物搜索是「先问 TMDB 要片单→只对你点的那部去搜种」。
@@ -3871,8 +4251,11 @@ def _ix_match(ix, cats):
 FILTER_CATS = {"movie": [2000], "tv": [5000], "anime": [5070], "book": [7000], "music": [3000]}
 FILTER_CN   = {"movie": "电影", "tv": "电视剧", "anime": "动漫", "book": "漫画/书", "music": "音乐"}
 
-def prowlarr_search_fan(queries, log=lambda m: None, per_timeout=None, deadline=None, cats=None):
-    """MP式分站并发：每站独立请求 + 单站超时 + 全局截止。
+def prowlarr_search_fan(queries, log=lambda m: None, per_timeout=None, deadline=None, cats=None, only=None):
+    """⚠️ 交互搜索专用。辅种走 prowlarr_search(聚合接口),那边要的是「一个站都不能少」,
+       本函数会主动丢慢站,用在辅种上会悄悄削掉覆盖面 —— 种子还在,只是活不长,极难察觉。
+
+       MP式分站并发：每站独立请求 + 单站超时 + 全局截止。
        ① 线程池以前只有 32 个位子,66 个站要排两三波,一波 25 秒 → 光扇出就能耗掉 40 秒。
           现在一次性铺开,所有站同时发车,总耗时 = 最慢的那个站,而不是波数 × 波长。
        ② 再加一道全局截止:到点就带着已经拿到的结果收网,掉队的站不等 —— 搜索时间从此有上限。
@@ -3888,6 +4271,14 @@ def prowlarr_search_fan(queries, log=lambda m: None, per_timeout=None, deadline=
     except Exception as e:
         log(f"⚠️ 取站点列表失败({str(e)[:30]})，退回聚合搜索"); return prowlarr_search(queries[0], cats)
     from concurrent.futures import ThreadPoolExecutor, wait
+    if only:
+        # 批量下载专用:一部片只需要一个好种,没必要问 66 个站。
+        # 覆盖面交给后台辅种(那边走 prowlarr_search 全站),这里只求快、且不给站点添压力。
+        keep = [i for i in idx if any(o.strip().lower() in i.get("name", "").lower()
+                                      for o in only if o.strip())]
+        if keep:
+            log(f"🎯 只搜指定站点:{len(keep)} 个({'、'.join(i['name'] for i in keep[:6])})")
+            idx = keep
     if cats:
         keep = [i for i in idx if _ix_match(i, cats)]
         if keep and len(keep) < len(idx):
@@ -4274,6 +4665,176 @@ def research_all_worker():
     finally:
         _BATCH["research"] = False
 
+# ============ 媒体库体检 ============
+# 为什么要常驻而不是写个一次性脚本:分类和目录结构会**持续**出问题 ——
+# 欧美式发布名的动漫认不出字幕组标记、TMDB 有些条目压根没填类型、新剧陆续下载导致季目录缺失。
+# 头痛医头的话每隔一阵就得重新翻一遍库。做成体检:随时能查、能一键修、修完自证。
+_LIBAUDIT = {"ts": 0, "d": None}
+
+_GENRE_CACHE = {}       # "tv:123" → True/False/None,一个条目的类型不会天天变,存久点
+def _genre_anime(mtype, tid):
+    """问 TMDB 这个条目是不是动画(genre 16)。返回 True/False/None(查不到或条目没填类型)。"""
+    k = f"{mtype or 'tv'}:{tid}"
+    if k in _GENRE_CACHE: return _GENRE_CACHE[k]
+    v = None
+    try:
+        d = tmdb_details(mtype or "tv", tid)
+        gs = d.get("genres")
+        # 条目本身没填类型(TMDB 上的劣质用户条目) → None,判不了,交给人
+        v = any(g.get("id") == 16 for g in gs) if gs else None
+    except Exception:
+        v = None
+    if len(_GENRE_CACHE) > 3000: _GENRE_CACHE.clear()
+    _GENRE_CACHE[k] = v
+    return v
+
+def _genre_warm(rows):
+    """并发把这批条目的类型问回来填进缓存。
+       串行查 63 部要 44 秒(单次 0.7s),浏览器等不及就断了 —— 体检必须并发。"""
+    todo = {(mt or "tv", tid) for _t, mt, tid, _n, _c in rows
+            if tid and f"{mt or 'tv'}:{tid}" not in _GENRE_CACHE}
+    if not todo: return
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(lambda x: _genre_anime(x[0], x[1]), todo))
+
+def library_audit(force=False):
+    """扫媒体库,找出三类毛病:
+       ① 分类错  —— TMDB 说是动画却在剧集库(或反过来)
+       ② 结构乱  —— 剧集文件平铺在根目录,没有 Season XX 子目录
+       ③ 判不了  —— TMDB 条目缺类型信息,得人工改识别
+       只报告不修改;修由 /api/libfix 执行。"""
+    if not force and _LIBAUDIT["d"] and time.time() - _LIBAUDIT["ts"] < 600:
+        return _LIBAUDIT["d"]
+    wrong_cat, flat, unknown, missing = [], [], [], []
+    try:
+        c = db()
+        rows = c.execute("SELECT DISTINCT target,mtype,tmdbid,tmdb_name,cat FROM media "
+                         "WHERE status='done' AND target!='' AND tmdbid IS NOT NULL").fetchall()
+        c.close()
+    except Exception as e:
+        return {"ok": False, "err": str(e)[:80]}
+    _genre_warm(rows)          # 先并发把类型问回来,后面循环就全是缓存命中
+    anime_root = CFG["MEDIA_ANIME"] or CFG["MEDIA_TV"]
+    for tgt, mtype, tid, tname, cat in rows:
+        if not os.path.isdir(tgt):
+            missing.append({"name": tname, "target": tgt}); continue
+        ani = _genre_anime(mtype, tid)
+        want_root = (anime_root if ani else
+                     (CFG["MEDIA_MOVIE"] if mtype == "movie" else CFG["MEDIA_TV"]))
+        if ani is None:
+            unknown.append({"name": tname, "tmdbid": tid, "target": tgt})
+        elif CFG["MEDIA_ANIME"] and os.path.dirname(tgt.rstrip("/")) != want_root.rstrip("/"):
+            wrong_cat.append({"name": tname, "tmdbid": tid, "target": tgt,
+                              "to": os.path.join(want_root, os.path.basename(tgt)),
+                              "why": "TMDB 标为动画" if ani else "TMDB 未标为动画"})
+        if (mtype or "tv") == "tv":
+            # 根目录直接躺着剧集文件 = 没分季
+            loose = {}
+            try:
+                for f in os.listdir(tgt):
+                    if not os.path.isfile(os.path.join(tgt, f)): continue
+                    if os.path.splitext(f)[1].lower() not in _VIDEO_EXT: continue
+                    ss = _season_of(f)
+                    loose.setdefault(ss or 0, 0)
+                    loose[ss or 0] += 1
+            except Exception: continue
+            if loose:
+                tot_f = sum(loose.values()); noseason = loose.get(0, 0)
+                # 一部剧里超过 30% 的文件抠不出季号(命名不统一,比如「中国四大名著」这种四部合集),
+                # 硬分季会变成「一部分进 Season 01、一部分留根目录」的半吊子状态,比全平铺更糟。
+                # 这种整部跳过、单列出来交给人 —— 自动化要知道自己什么时候不该动手。
+                messy = tot_f and noseason / tot_f > 0.30
+                item = {"name": tname, "target": tgt,
+                        "seasons": {str(k): v for k, v in sorted(loose.items())},
+                        "files": tot_f, "noseason": noseason}
+                if messy:
+                    item["why"] = f"{noseason}/{tot_f} 个文件解析不出季号,命名不统一,自动分季只会更乱"
+                    unknown.append(item)
+                else:
+                    flat.append(item)
+    d = {"ok": True, "wrong_cat": wrong_cat, "flat": flat, "unknown": unknown, "missing": missing,
+         "total": len(rows), "ts": int(time.time())}
+    _LIBAUDIT.update(ts=time.time(), d=d)
+    return d
+
+def library_fix(do_cat=True, do_season=True):
+    """按体检结果修正。全部用 os.rename:
+       媒体库文件是硬链接(和下载目录共享 inode),rename 只改目录项不动数据,**做种完全不受影响**。
+       同文件系统内是原子操作,不复制、不占额外空间。"""
+    a = library_audit(force=True)
+    if not a.get("ok"): return a
+    moved = seasoned = 0; errs = []
+    remap = {}
+    if do_cat:
+        for it in a["wrong_cat"]:
+            src, dst = it["target"], it["to"]
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if os.path.exists(dst): errs.append(f"{it['name']}: 目标已存在,跳过"); continue
+                os.rename(src, dst); remap[src] = dst; moved += 1
+                logmsg("INFO", f"媒体库归位: {it['name']} → {dst}")
+            except Exception as e:
+                errs.append(f"{it['name']}: {str(e)[:50]}")
+    if do_season:
+        for it in a["flat"]:
+            base = remap.get(it["target"], it["target"])
+            if not os.path.isdir(base): continue
+            n = 0
+            try:
+                for f in list(os.listdir(base)):
+                    fp = os.path.join(base, f)
+                    if not os.path.isfile(fp): continue
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext not in _VIDEO_EXT and ext not in (".srt", ".ass", ".sub", ".nfo"): continue
+                    if f in ("tvshow.nfo", "movie.nfo"): continue
+                    ss = _season_of(f)
+                    if not ss: continue        # 抠不到季号的原地不动,不瞎猜
+                    sd = os.path.join(base, f"Season {ss:02d}")
+                    os.makedirs(sd, exist_ok=True)
+                    dst = os.path.join(sd, f)
+                    if os.path.exists(dst): continue
+                    os.rename(fp, dst); n += 1
+                if n: seasoned += 1; logmsg("INFO", f"媒体库分季: {it['name']} 移动 {n} 个文件")
+            except Exception as e:
+                errs.append(f"{it['name']}: {str(e)[:50]}")
+    if remap:
+        try:
+            c = db()
+            for o, nw in remap.items(): c.execute("UPDATE media SET target=? WHERE target=?", (nw, o))
+            c.commit(); c.close()
+        except Exception as e: errs.append(f"数据库更新失败: {str(e)[:40]}")
+    _LIBAUDIT["d"] = None
+    try: emby_refresh()
+    except Exception: pass
+    return {"ok": True, "moved": moved, "seasoned": seasoned, "errs": errs}
+
+def library_setcat(target, cat):
+    """人工指定某部片的分类并立刻搬库。
+       用于 TMDB 条目没填类型、自动判不了的情况(比如猫和老鼠那个 tmdbid=325591)。
+       比"为了让自动分类认出来而去挂一个内容不匹配的 TMDB 条目"正确得多 ——
+       那样会让每集标题/剧情全部错位。分类写进库,以后体检不再报它。"""
+    roots = {"动漫": CFG["MEDIA_ANIME"] or CFG["MEDIA_TV"],
+             "电视剧": CFG["MEDIA_TV"], "电影": CFG["MEDIA_MOVIE"]}
+    if cat not in roots: return {"ok": False, "err": "分类只能是 动漫/电视剧/电影"}
+    if not os.path.isdir(target): return {"ok": False, "err": "目录不存在"}
+    dst = os.path.join(roots[cat], os.path.basename(target.rstrip("/")))
+    try:
+        if os.path.realpath(dst) != os.path.realpath(target):
+            if os.path.exists(dst): return {"ok": False, "err": "目标已存在,请先处理"}
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.rename(target, dst)
+        c = db()
+        c.execute("UPDATE media SET cat=?, target=? WHERE target=?", (cat, dst, target))
+        c.commit(); c.close()
+        _LIBAUDIT["d"] = None
+        logmsg("INFO", f"人工归类: {os.path.basename(dst)} → {cat}")
+        try: emby_refresh()
+        except Exception: pass
+        return {"ok": True, "to": dst}
+    except Exception as e:
+        return {"ok": False, "err": str(e)[:80]}
+
 _HEALTH_CACHE = {"ts": 0, "d": None}
 def health_report(force=False):
     """做种健康体检:tracker掉线(白做)、0-peer冷种、tr错误种子。缓存5分钟(遍历几千种较重)"""
@@ -4631,6 +5192,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if s.path.startswith("/api/settings"):
             s._settings_post(); return
+        if s.path.startswith("/api/batchgo"):
+            s._batchgo(); return
         if s.path.startswith("/api/ks/add"):
             s._ks_add(); return
         s.send_response(404); s.end_headers()
@@ -4697,6 +5260,16 @@ class Handler(BaseHTTPRequestHandler):
             s._dashboard(); return
         if s.path.startswith("/api/ks/"):
             s._ks(); return
+        if s.path.startswith("/api/batchplan"):
+            s._batchplan(); return
+        if s.path.startswith("/api/batchstat"):
+            s._batchstat(); return
+        if s.path.startswith("/api/libaudit"):
+            s._libaudit(); return
+        if s.path.startswith("/api/libcat"):
+            s._libcat(); return
+        if s.path.startswith("/api/libfix"):
+            s._libfix(); return
         if s.path.startswith("/api/health"):
             from urllib.parse import urlparse, parse_qs
             force = parse_qs(urlparse(s.path).query).get("force") == ["1"]
@@ -4784,8 +5357,14 @@ class Handler(BaseHTTPRequestHandler):
                    f"stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>"
                    f"<path d='M4 20h4L19.5 8.5a2.12 2.12 0 0 0-3-3L5 17v3z'/>"
                    f"<path d='M14.5 6.5l3 3'/></svg></button>")
+            # 标出季号:同一部剧下了好几季时,库里存的是剧集级匹配(名字+首播年都一样),
+            # 卡片长得一模一样根本分不清谁是谁。季号从种子名解析,补在年份后面。
+            sub = esc(yr or "")
+            if mt == "tv":
+                ss = _season_of(nm or "")
+                if ss: sub = (sub + " · " if sub else "") + f"第{ss}季"
             return (f"<div class=rcard title='{esc(nm)}' data-mt='{esc(mt)}' data-tid='{tid or 0}'><div class=rbob>{thumb}{fix}"
-                    f"<div class=rname>{esc(title)}</div><div class=ryear>{esc(yr or '')}</div></div></div>")
+                    f"<div class=rname>{esc(title)}</div><div class=ryear>{sub}</div></div></div>")
         media_rows = ""
         if pend:
             nhold = sum(1 for r in pend if r[5] == "hold")
@@ -4987,6 +5566,47 @@ class Handler(BaseHTTPRequestHandler):
         s.send_header("Content-Type", {"png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg"))
         s.send_header("Cache-Control", "max-age=604800"); s.send_header("Content-Length", str(len(data)))
         s.end_headers(); s.wfile.write(data)
+    def _batchplan(s):
+        from urllib.parse import urlparse, parse_qs
+        q = parse_qs(urlparse(s.path).query)
+        col = (q.get("col",["classic"])[0]).strip()
+        n = int((q.get("n",["50"])[0]) or 50); n = max(1, min(n, 250))
+        p4k = (q.get("k",[""])[0]) == "1"
+        jid = str(int(time.time()*1000)) + "-" + base64.b16encode(os.urandom(2)).decode()
+        _BJOBS[jid] = {"rows": [], "done": 0, "total": n, "cur": "", "fin": False, "ts": time.time()}
+        threading.Thread(target=_bjob_run, args=(jid, col, n, p4k), daemon=True).start()
+        for k in [k for k, v in list(_BJOBS.items()) if time.time()-v["ts"] > 3600 and k != jid]:
+            _BJOBS.pop(k, None)
+        s._send_json({"ok": True, "id": jid})
+    def _batchstat(s):
+        from urllib.parse import urlparse, parse_qs
+        j = _BJOBS.get((parse_qs(urlparse(s.path).query).get("id",[""])[0]).strip())
+        if not j: s._send_json({"ok": False, "err": "任务不存在或已过期"}); return
+        s._send_json({"ok": True, "done": j["done"], "total": j["total"], "cur": j.get("cur",""),
+                      "fin": j["fin"], "err": j.get("err",""), "rows": j["rows"]})
+    def _batchgo(s):
+        try:
+            n = int(s.headers.get("Content-Length") or 0)
+            rows = json.loads(s.rfile.read(n) or b"{}").get("rows") or []
+        except Exception as e:
+            s._send_json({"ok": False, "err": f"请求解析失败:{e}"}); return
+        if not rows: s._send_json({"ok": False, "err": "没有选中任何片子"}); return
+        s._send_json(batch_download(rows))
+    def _libaudit(s):
+        from urllib.parse import urlparse, parse_qs
+        f = (parse_qs(urlparse(s.path).query).get("force",[""])[0]) == "1"
+        try: s._send_json(library_audit(force=f))
+        except Exception as e: s._send_json({"ok":False,"err":str(e)[:80]})
+    def _libcat(s):
+        from urllib.parse import urlparse, parse_qs, unquote
+        q = parse_qs(urlparse(s.path).query)
+        tgt = unquote((q.get("target",[""])[0]).strip()); cat = unquote((q.get("cat",[""])[0]).strip())
+        if not tgt: s._send_json({"ok":False,"err":"缺少 target"}); return
+        s._send_json(library_setcat(tgt, cat))
+    def _libfix(s):
+        try: s._send_json(library_fix())
+        except Exception as e:
+            logmsg("ERROR", f"媒体库修正失败: {e}"); s._send_json({"ok":False,"err":str(e)[:80]})
     def _search2(s):
         from urllib.parse import urlparse, parse_qs
         qs = parse_qs(urlparse(s.path).query)
