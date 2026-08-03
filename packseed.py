@@ -2329,6 +2329,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 <span class=fpill data-f=book onclick=tgF(this)>📖 漫画/书</span>
 <span class=fpill data-f=music onclick=tgF(this)>🎵 音乐</span>
 <span class=ppill id=ppill onclick=tgP(this)>👤 找人</span>
+<span class=ppill id=apill onclick=tgA(this)>🎵 找歌手</span>
 </div>
 </div>
 <div class=card id=dbshelf><h2>🎞 豆瓣经典榜 <span class=mut style=font-weight:400>· 按豆瓣评分排的高分经典 · 点海报直接全站找源,选个站就能下</span><span class=dbsrc id=dbsrc></span>
@@ -3268,10 +3269,108 @@ function mkBack(){
   return b2;}
  return null;
 }
+var _amode=false;
+function tgA(el){
+ _amode=!_amode; el.classList.toggle('on',_amode);
+ if(_amode&&_pmode){_pmode=false;var p=document.getElementById('ppill');if(p)p.classList.remove('on');}
+ var q=document.getElementById('q');
+ q.placeholder=_amode?'歌手名字，回车列出全部专辑（按年代排序 + 经典度推荐）':'片名 / 剧名 / 专辑,回车即搜';
+ q.focus();
+}
+function doArtist(a){
+ var box=document.getElementById('sresult');
+ _backto=null;_dbback=false;_noReload=true;
+ box.innerHTML='<div class="voy card"><div class=mut style="padding:16px 20px" id=arTip>正在问 iTunes 要「'+a+'」的专辑年表…</div></div>';
+ fetch('/api/artist?q='+encodeURIComponent(a)).then(r=>r.json()).then(function(d){
+  if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">'+(d.err||'提交失败')+'</div>';return;}
+  artPoll(d.id,box,Date.now());
+ }).catch(function(){box.innerHTML='<div class=mut style="padding:10px 16px">提交出错</div>';});
+}
+function artPoll(id,box,t0){
+ fetch('/api/artstat?id='+id).then(r=>r.json()).then(function(j){
+  if(!j.ok){box.innerHTML='<div class=mut style="padding:10px 16px">'+(j.err||'任务丢失')+'</div>';return;}
+  if(!j.fin){
+   var e=document.getElementById('arTip');
+   if(e)e.textContent=((j.log||[]).slice(-1)[0]||'搜索中')+' · 已 '+Math.round((Date.now()-t0)/1000)+' 秒';
+   setTimeout(function(){artPoll(id,box,t0);},1200);return;
+  }
+  artRender(j.result||{},box);
+ }).catch(function(){setTimeout(function(){artPoll(id,box,t0);},2500);});
+}
+function artRender(d,box){
+ box.innerHTML='';
+ if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">'+(d.err||'失败')+'</div>';return;}
+ var rows=d.rows||[];
+ if(!rows.length){
+  box.innerHTML='<div class=empty><div class=ei>🎵</div><div class=et>没找到「'+d.artist+'」的专辑</div>'+
+   '<div>'+(d.nodisc?'iTunes 上查不到这个歌手，试试英文名或换个写法':'站上没有这些专辑的无损资源')+'</div></div>';
+  return;}
+ var card=document.createElement('div');card.className='card';
+ var h=document.createElement('h2');
+ h.textContent='🎵 '+d.artist+' — '+rows.length+' 张专辑（按发行年代排序）';
+ var sub=document.createElement('span');sub.className='mut';sub.style.fontWeight='400';
+ sub.textContent=' · ⭐ 推荐 = 正规专辑 + 分轨 + 做种最多；精选/Live 自动往后排';
+ h.appendChild(sub);card.appendChild(h);
+ var wrap=document.createElement('div');wrap.style.padding='0 16px 12px';
+ var tb=document.createElement('table');
+ var hr=document.createElement('tr');
+ ['','年份','专辑','曲目','选中的资源','站点','大小','做种'].forEach(function(x){
+  var th=document.createElement('th');th.textContent=x;hr.appendChild(th);});
+ tb.appendChild(hr);
+ rows.forEach(function(r,i){
+  var tr=document.createElement('tr');
+  var c0=document.createElement('td');
+  var cb=document.createElement('input');cb.type='checkbox';cb.className='asel';cb.dataset.i=i;
+  cb.checked=!!r.rec;c0.appendChild(cb);
+  var c1=document.createElement('td');c1.className='mut';c1.textContent=r.year||'';
+  var c2=document.createElement('td');
+  c2.textContent=r.album;
+  if(r.rec){var st=document.createElement('span');st.style.cssText='color:#FFD400;margin-left:4px';st.textContent='⭐';c2.appendChild(st);}
+  if(!r.studio){var nb=document.createElement('span');nb.className='mut';nb.style.fontSize='11px';
+   nb.textContent=' 精选/Live';c2.appendChild(nb);}
+  var c3=document.createElement('td');c3.className='mut r';c3.textContent=r.tracks||'';
+  var c4=document.createElement('td');c4.className='sname';c4.title=r.rel;c4.textContent=r.rel;
+  if(!r.split){var w=document.createElement('span');w.style.cssText='color:#FFD400;margin-left:4px';
+   w.textContent='[整轨]';c4.appendChild(w);}
+  var c5=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=r.site;c5.appendChild(sp);
+  var c6=document.createElement('td');c6.className='r';c6.textContent=r.sizeh;
+  var c7=document.createElement('td');c7.className='r';c7.textContent=r.seeders;
+  [c0,c1,c2,c3,c4,c5,c6,c7].forEach(function(x){tr.appendChild(x);});
+  tb.appendChild(tr);
+ });
+ wrap.appendChild(tb);
+ var bar=document.createElement('div');bar.style.marginTop='12px';
+ var all=document.createElement('button');all.className='dlbtn';all.style.marginRight='8px';
+ all.textContent='全选/全不选';
+ all.onclick=function(){var cs=document.querySelectorAll('.asel');var v=!cs[0].checked;
+  cs.forEach(function(x){x.checked=v;});};
+ var rec=document.createElement('button');rec.className='dlbtn';rec.style.marginRight='8px';
+ rec.textContent='只选推荐';
+ rec.onclick=function(){document.querySelectorAll('.asel').forEach(function(x){
+  x.checked=!!rows[parseInt(x.dataset.i)].rec;});};
+ var go=document.createElement('button');go.className='dlbtn';go.textContent='推送到 qb 下载';
+ go.onclick=function(){
+  var picked=[];document.querySelectorAll('.asel').forEach(function(x){
+   if(x.checked){var r=rows[parseInt(x.dataset.i)];picked.push({title:r.album,rel:r.rel,url:r.url});}});
+  if(!picked.length){toast('一张都没选');return;}
+  go.disabled=true;go.textContent='推送中…（每张间隔 2 秒）';
+  fetch('/api/batchgo',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({rows:picked,cat:'音乐'})}).then(r=>r.json()).then(function(x){
+    go.textContent=x.ok?('✅ 已推送 '+x.added+' 张'+(x.failed?('，失败 '+x.failed):'')):'推送失败';
+    toast(x.ok?('已推送 '+x.added+' 张到 qb'):(x.err||'失败'));
+   }).catch(function(){go.disabled=false;go.textContent='推送到 qb 下载';toast('推送出错');});
+ };
+ bar.appendChild(all);bar.appendChild(rec);bar.appendChild(go);wrap.appendChild(bar);
+ var note=document.createElement('div');note.className='mut';note.style.cssText='margin-top:6px;font-size:12px';
+ note.textContent='默认已勾选推荐的。下完自动进 Navidrome：原目录结构硬链接 → LrcApi 抓歌词 → iTunes 抓封面。[整轨] 的一张专辑是一个大文件，Navidrome 认不出单曲，尽量别选。';
+ wrap.appendChild(note);
+ card.appendChild(wrap);box.appendChild(card);
+}
 function doSearch(){
  var q=document.getElementById('q').value.trim();if(!q)return;
  clearTimeout(_t);
  var box=document.getElementById('sresult');
+ if(_amode){doArtist(q);return;}
  if(_pmode){doPerson(q);return;}
  _backto=null;_dbback=false;
  box.innerHTML=VOYAGE;
@@ -3998,6 +4097,114 @@ def douban_shelf(col, start=0, count=24):
     return {"ok": True, "col": col, "src": src, "start": start,
             "label": DOUBAN_COLS[col][0], "items": out}
 
+# ============ 歌手专辑(按年代排序 + 经典度评分 + 推荐) ============
+# 为什么不是简单搜一下:PT 搜索结果是按做种数堆在一起的一坨,分不清哪张是正传、哪张是精选、
+# 哪张是 Live,更看不出发行顺序。收藏一个歌手要的是**按年代铺开的正规专辑**,
+# 所以先问 iTunes 要完整年表,再拿每张去 PT 找源。
+
+CFG.setdefault("MUSIC_SITES", os.environ.get("MUSIC_SITES", "OpenCD,AGSVPT,CarPT,M-Team,DICMusic"))
+
+_SPLIT_RE  = re.compile(r'分轨|分軌|Multi\s*File', re.I)          # 一首歌一个文件,Navidrome 才认单曲
+_WHOLE_RE  = re.compile(r'整轨|整軌|Single\s*File', re.I)          # 整张一个大文件+CUE,播放器难用
+_LOSS_RE   = re.compile(r'\b(FLAC|APE|WAV|DSD|DSF|SACD|WV|TAK)\b', re.I)
+_SINGLE_RE = re.compile(r'单曲|單曲|\bSingle\b|\bEP\b', re.I)
+# 精选/现场/翻唱等「非正传」标记 —— 收藏优先正规录音室专辑
+_NONSTUDIO = re.compile(r'精选|精選|合辑|合輯|全集|全收录|典藏|珍藏|新歌\s*\+|BEST|Greatest|Collection|'
+                        r'现场|現場|演唱会|演唱會|Live|Concert|Remix|伴奏|卡拉|OST|原声', re.I)
+
+def itunes_discography(artist):
+    """问 iTunes 要某歌手的专辑年表(按发行日期升序)。这是「按时间排列」的数据来源 ——
+       PT 站的种子名里年份写法五花八门,靠它归不出可靠的年表。"""
+    try:
+        q = urllib.parse.urlencode({"term": artist, "media": "music", "entity": "musicArtist",
+                                    "limit": 1, "country": "cn"})
+        r = json.load(urllib.request.urlopen("https://itunes.apple.com/search?" + q, timeout=15))
+        res = r.get("results") or []
+        if not res: return []
+        aid = res[0].get("artistId")
+        q2 = urllib.parse.urlencode({"id": aid, "entity": "album", "limit": 200, "country": "cn"})
+        r2 = json.load(urllib.request.urlopen("https://itunes.apple.com/lookup?" + q2, timeout=20))
+        out = []
+        for x in r2.get("results", []):
+            if x.get("wrapperType") != "collection": continue
+            nm = x.get("collectionName") or ""
+            if not nm: continue
+            out.append({"album": nm, "year": (x.get("releaseDate") or "")[:4],
+                        "date": (x.get("releaseDate") or "")[:10],
+                        "tracks": x.get("trackCount") or 0,
+                        "art": (x.get("artworkUrl100") or "").replace("100x100", "600x600"),
+                        "artist": x.get("artistName") or artist})
+        out.sort(key=lambda a: a["date"] or "9999")
+        return out
+    except Exception as e:
+        logmsg("WARN", f"iTunes 年表取不到[{artist}]: {str(e)[:40]}")
+        return []
+
+def _score_music(title, seeders, size):
+    """经典度/可收藏度打分。做种数是 PT 圈公认度的最好代理 —— 越经典的专辑留存的人越多。
+       但光看做种会把精选集和单曲排到前面,所以要按「是不是正规专辑 + 是不是分轨」修正。"""
+    t = title or ""
+    sc = float(seeders or 0)
+    if _SPLIT_RE.search(t): sc += 500          # 分轨:Navidrome 能识别每首歌,这是硬需求
+    elif _WHOLE_RE.search(t): sc -= 400        # 整轨:一张专辑一个大文件,体验差
+    if re.search(r'\bFLAC\b', t, re.I): sc += 120   # FLAC 比 WAV/DSD 省一大截空间,音质无差
+    if _NONSTUDIO.search(t): sc -= 250         # 精选/Live 往后排,正传优先
+    if _SINGLE_RE.search(t) or size < 120 * 1024**2: sc -= 600   # 单曲/碎片不值得收藏
+    if size > 3 * 1024**3: sc -= 300           # 超大包(全收录那种)不好管理,也没法单张辅种
+    return sc
+
+def artist_albums(artist, log=lambda m: None):
+    """歌手专辑总览:iTunes 年表打底 → 每张去 PT 找源 → 按年代排序 + 标推荐。"""
+    sites = [x for x in CFG["MUSIC_SITES"].split(",") if x.strip()]
+    disc = itunes_discography(artist)
+    log(f"🎼 iTunes 年表:{len(disc)} 张专辑")
+    # 一次把歌手全部资源捞回来,再按专辑名归位 —— 比每张专辑搜一次省几十倍请求
+    res = prowlarr_search_fan([artist], log=log, cats=FILTER_CATS["music"], only=sites)
+    pool = []
+    for r in res:
+        t = (r.get("title") or "").strip()
+        if not t or not _LOSS_RE.search(t): continue     # 只收无损
+        pool.append({"title": t, "site": r.get("indexer",""), "size": r.get("size") or 0,
+                     "sizeh": human_size(r.get("size") or 0), "seeders": r.get("seeders") or 0,
+                     "url": r.get("downloadUrl") or r.get("guid") or ""})
+    def norm(x): return re.sub(r'[^0-9a-z一-鿿]+', '', (x or "").lower())
+    def hit(key, title):
+        """专辑名对不对得上。不能只用「包含」——iTunes 给的常是繁体(葉惠美/八度空間),
+           而种子名有简有繁,「十一月的蕭邦」和「十一月的萧邦」只差一个字就整张漏掉。
+           改成按字符重合率:繁简之间大部分字是相同的,0.75 的门槛能吃掉这类差异,
+           又不至于把「范特西」误配到「依然范特西」以外的东西上。"""
+        t = norm(title)
+        if key in t: return True
+        if len(key) < 3: return False
+        same = sum(1 for ch in set(key) if ch in t)
+        return same / len(set(key)) >= 0.75
+    rows = []
+    used = set()
+    for a in disc:
+        key = norm(a["album"])
+        if not key or len(key) < 2: continue
+        cands = [p for p in pool if hit(key, p["title"])]
+        if not cands: continue
+        for c in cands: c["_s"] = _score_music(c["title"], c["seeders"], c["size"])
+        cands.sort(key=lambda c: -c["_s"])
+        best = cands[0]
+        used.add(best["title"])
+        rows.append({"album": a["album"], "year": a["year"], "date": a["date"],
+                     "tracks": a["tracks"], "art": a["art"],
+                     "rel": best["title"], "site": best["site"], "sizeh": best["sizeh"],
+                     "size": best["size"], "seeders": best["seeders"], "url": best["url"],
+                     "score": round(best["_s"]), "alts": len(cands),
+                     "studio": not bool(_NONSTUDIO.search(best["title"])),
+                     "split": bool(_SPLIT_RE.search(best["title"]))})
+    rows.sort(key=lambda r: r["date"] or "9999")
+    # 推荐:正传 + 分轨 + 分数排前列。经典度靠做种数,但正传和分轨是硬门槛
+    ranked = sorted([r for r in rows if r["studio"] and r["split"]], key=lambda r: -r["score"])
+    top = {id(r) for r in ranked[:12]}
+    for r in rows: r["rec"] = id(r) in top
+    log(f"✅ 匹配到 {len(rows)} 张有源,其中推荐 {sum(1 for r in rows if r['rec'])} 张")
+    return {"ok": True, "artist": artist, "rows": rows,
+            "nodisc": len(disc) == 0, "pool": len(pool)}
+
 # ============ 榜单批量下载 ============
 # 为什么是「一部一个种」而不是「一个大包」:
 #   ① 大包一个 TMDB 身份套几百部,识别必错,包内文件名不规范时事后拆不动(用户吃过这个亏);
@@ -4010,6 +4217,16 @@ CFG.setdefault("BATCH_MIN_GB", float(os.environ.get("BATCH_MIN_GB", "2")))
 CFG.setdefault("BATCH_MAX_GB", float(os.environ.get("BATCH_MAX_GB", "25")))
 
 _BJOBS = {}
+_AJOBS = {}
+def _ajob_run(jid, artist):
+    job = _AJOBS[jid]
+    def log(m): job["log"].append(m)
+    try:
+        job["result"] = artist_albums(artist, log)
+    except Exception as e:
+        job["result"] = {"ok": False, "err": str(e)[:100]}
+        logmsg("ERROR", f"歌手专辑失败[{artist}]: {e}")
+    job["fin"] = True
 
 def _pick_release(results, prefer_4k=False):
     """从一堆候选里挑一个最适合收藏的。规则(按优先级):
@@ -4083,13 +4300,13 @@ def _bjob_run(jid, col, total, prefer_4k):
         job["err"] = str(e)[:120]
     job["fin"] = True
 
-def batch_download(rows):
+def batch_download(rows, cat=""):
     """把选中的种子推给 qb。逐个加、留间隔 —— 一秒钟几十个下载请求会被站点盯上。"""
     ok = fail = 0; errs = []
     for r in rows:
         try:
             data = prowlarr_download(r["url"])
-            qb_conn().add(data, category=CFG["QB_CATEGORY"] or "电影")
+            qb_conn().add(data, category=cat or CFG["QB_CATEGORY"] or "电影")
             ok += 1
             logmsg("INFO", f"榜单批量 → qb: {r.get('title','')} | {r.get('rel','')[:40]}")
         except Exception as e:
@@ -5260,6 +5477,10 @@ class Handler(BaseHTTPRequestHandler):
             s._dashboard(); return
         if s.path.startswith("/api/ks/"):
             s._ks(); return
+        if s.path.startswith("/api/artist"):
+            s._artist(); return
+        if s.path.startswith("/api/artstat"):
+            s._artstat(); return
         if s.path.startswith("/api/batchplan"):
             s._batchplan(); return
         if s.path.startswith("/api/batchstat"):
@@ -5566,6 +5787,22 @@ class Handler(BaseHTTPRequestHandler):
         s.send_header("Content-Type", {"png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg"))
         s.send_header("Cache-Control", "max-age=604800"); s.send_header("Content-Length", str(len(data)))
         s.end_headers(); s.wfile.write(data)
+    def _artist(s):
+        from urllib.parse import urlparse, parse_qs
+        a = (parse_qs(urlparse(s.path).query).get("q",[""])[0]).strip()
+        if not a: s._send_json({"ok":False,"err":"歌手名为空"}); return
+        jid = str(int(time.time()*1000)) + "-" + base64.b16encode(os.urandom(2)).decode()
+        _AJOBS[jid] = {"log": [], "fin": False, "result": None, "ts": time.time()}
+        threading.Thread(target=_ajob_run, args=(jid, a), daemon=True).start()
+        for k in [k for k, v in list(_AJOBS.items()) if time.time()-v["ts"] > 1800 and k != jid]:
+            _AJOBS.pop(k, None)
+        s._send_json({"ok": True, "id": jid})
+    def _artstat(s):
+        from urllib.parse import urlparse, parse_qs
+        j = _AJOBS.get((parse_qs(urlparse(s.path).query).get("id",[""])[0]).strip())
+        if not j: s._send_json({"ok":False,"err":"任务不存在或已过期"}); return
+        s._send_json({"ok":True,"fin":j["fin"],"log":j["log"][-6:],
+                      "result": j["result"] if j["fin"] else None})
     def _batchplan(s):
         from urllib.parse import urlparse, parse_qs
         q = parse_qs(urlparse(s.path).query)
@@ -5587,11 +5824,12 @@ class Handler(BaseHTTPRequestHandler):
     def _batchgo(s):
         try:
             n = int(s.headers.get("Content-Length") or 0)
-            rows = json.loads(s.rfile.read(n) or b"{}").get("rows") or []
+            _b = json.loads(s.rfile.read(n) or b"{}")
+            rows = _b.get("rows") or []; _cat = _b.get("cat") or ""
         except Exception as e:
             s._send_json({"ok": False, "err": f"请求解析失败:{e}"}); return
         if not rows: s._send_json({"ok": False, "err": "没有选中任何片子"}); return
-        s._send_json(batch_download(rows))
+        s._send_json(batch_download(rows, _cat))
     def _libaudit(s):
         from urllib.parse import urlparse, parse_qs
         f = (parse_qs(urlparse(s.path).query).get("force",[""])[0]) == "1"
