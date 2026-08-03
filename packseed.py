@@ -3606,14 +3606,14 @@ function libAudit(btn){
   if(btn){btn.disabled=false;btn.textContent='重新体检';}
   if(!d.ok){box.innerHTML='<span class=mut>体检失败：'+(d.err||'')+'</span>';return;}
   box.innerHTML='';
-  var wc=d.wrong_cat||[],fl=d.flat||[],uk=d.unknown||[],ms=d.missing||[];
+  var wc=d.wrong_cat||[],fl=d.flat||[],uk=d.unknown||[],ms=d.missing||[],ex=d.extras||[];
   var lock=document.createElement('div');lock.className='cachetip';lock.style.marginLeft='0';
   var lt=document.createElement('span');lt.textContent='📌 已暂停本页的自动刷新，结果不会自己消失。看完点右边恢复。';
   var lb=document.createElement('button');lb.textContent='恢复自动刷新';
   lb.onclick=function(){_noReload=false;armReload('media');lock.remove();};
   lock.appendChild(lt);lock.appendChild(lb);box.appendChild(lock);
   var sum=document.createElement('div');sum.className='mut';sum.style.marginBottom='10px';
-  sum.textContent='共 '+d.total+' 部 · 分类错放 '+wc.length+' · 季目录缺失 '+fl.length+' · 待人工确认 '+uk.length+' · 目录丢失 '+ms.length;
+  sum.textContent='共 '+d.total+' 部 · 分类错放 '+wc.length+' · 季目录缺失 '+fl.length+' · 特典待归位 '+ex.length+' · 待人工确认 '+uk.length+' · 目录丢失 '+ms.length;
   box.appendChild(sum);
   function sec(title,items,render){
    if(!items.length)return;
@@ -3633,6 +3633,10 @@ function libAudit(btn){
    var ks=Object.keys(x.seasons).map(function(k){return k=='0'?('无季号 '+x.seasons[k]+'个'):('S'+k+' '+x.seasons[k]+'个');});
    b.textContent=ks.join('  ');
    tr.appendChild(a);tr.appendChild(b);});
+  sec('🎁 特典待归位（可一键，移入 Season 00）',ex,function(tr,x){
+   var a=document.createElement('td');a.textContent=x.name;
+   var b=document.createElement('td');b.className='mut';b.textContent=x.why;
+   tr.appendChild(a);tr.appendChild(b);tr.appendChild(document.createElement('td'));});
   sec('❓ 待人工确认（自动判不了，不硬来）',uk,function(tr,x){
    var a=document.createElement('td');a.textContent=x.name;
    var b=document.createElement('td');b.className='mut';
@@ -3651,9 +3655,9 @@ function libAudit(btn){
    var a=document.createElement('td');a.textContent=x.name;
    var b=document.createElement('td');b.className='mut';b.textContent=x.target;
    tr.appendChild(a);tr.appendChild(b);});
-  if(wc.length||fl.length){
+  if(wc.length||fl.length||ex.length){
    var f=document.createElement('button');f.className='dlbtn';f.style.margin='12px 0 0';
-   f.textContent='一键修正（'+(wc.length+fl.length)+' 项）';
+   f.textContent='一键修正（'+(wc.length+fl.length+ex.length)+' 项）';
    f.onclick=function(){libFix(f);};box.appendChild(f);
    var note=document.createElement('div');note.className='mut';note.style.marginTop='6px';note.style.fontSize='12px';
    note.textContent='媒体库文件是硬链接，移动只改目录项不动数据，做种不受影响。修完记得在 Emby 里扫描一次媒体库。';
@@ -4954,6 +4958,7 @@ def _genre_warm(rows):
     with ThreadPoolExecutor(max_workers=8) as ex:
         list(ex.map(lambda x: _genre_anime(x[0], x[1]), todo))
 
+_SDIR_RE = re.compile(r'^Season\s+\d{1,2}$', re.I)
 def library_audit(force=False):
     """扫媒体库,找出三类毛病:
        ① 分类错  —— TMDB 说是动画却在剧集库(或反过来)
@@ -4962,7 +4967,7 @@ def library_audit(force=False):
        只报告不修改;修由 /api/libfix 执行。"""
     if not force and _LIBAUDIT["d"] and time.time() - _LIBAUDIT["ts"] < 600:
         return _LIBAUDIT["d"]
-    wrong_cat, flat, unknown, missing = [], [], [], []
+    wrong_cat, flat, unknown, missing, extras = [], [], [], [], []
     try:
         c = db()
         rows = c.execute("SELECT DISTINCT target,mtype,tmdbid,tmdb_name,cat FROM media "
@@ -4986,14 +4991,18 @@ def library_audit(force=False):
                               "why": "TMDB 标为动画" if ani else "TMDB 未标为动画"})
         if (mtype or "tv") == "tv":
             # 根目录直接躺着剧集文件 = 没分季
-            loose = {}
+            loose = {}; loose_names = []; has_sdir = False
             try:
                 for f in os.listdir(tgt):
-                    if not os.path.isfile(os.path.join(tgt, f)): continue
+                    fp = os.path.join(tgt, f)
+                    if os.path.isdir(fp):
+                        if _SDIR_RE.match(f): has_sdir = True
+                        continue
                     if os.path.splitext(f)[1].lower() not in _VIDEO_EXT: continue
                     ss = _season_of(f)
                     loose.setdefault(ss or 0, 0)
                     loose[ss or 0] += 1
+                    if not ss: loose_names.append(f)
             except Exception: continue
             if loose:
                 tot_f = sum(loose.values()); noseason = loose.get(0, 0)
@@ -5004,17 +5013,25 @@ def library_audit(force=False):
                 item = {"name": tname, "target": tgt,
                         "seasons": {str(k): v for k, v in sorted(loose.items())},
                         "files": tot_f, "noseason": noseason}
-                if messy:
+                if messy and has_sdir and noseason == tot_f:
+                    # Season 目录已经齐了、顶层只剩几个抠不出季号的 —— 这不是「命名乱」,
+                    # 是 SP/片头片尾/纪录片/衍生电影这类**特典没归位**(实测 12 部全是这样)。
+                    # 判它不需要猜季号,所以能自动修:Emby 的惯例是特典进 Season 00(特别篇)。
+                    item["why"] = ("Season 目录已齐,%d 个特典散在根目录:" % tot_f) + "、".join(
+                        os.path.splitext(x)[0][:26] for x in loose_names[:3]) + ("…" if tot_f > 3 else "")
+                    item["names"] = loose_names
+                    extras.append(item)
+                elif messy:
                     item["why"] = f"{noseason}/{tot_f} 个文件解析不出季号,命名不统一,自动分季只会更乱"
                     unknown.append(item)
                 else:
                     flat.append(item)
     d = {"ok": True, "wrong_cat": wrong_cat, "flat": flat, "unknown": unknown, "missing": missing,
-         "total": len(rows), "ts": int(time.time())}
+         "extras": extras, "total": len(rows), "ts": int(time.time())}
     _LIBAUDIT.update(ts=time.time(), d=d)
     return d
 
-def library_fix(do_cat=True, do_season=True):
+def library_fix(do_cat=True, do_season=True, do_specials=True):
     """按体检结果修正。全部用 os.rename:
        媒体库文件是硬链接(和下载目录共享 inode),rename 只改目录项不动数据,**做种完全不受影响**。
        同文件系统内是原子操作,不复制、不占额外空间。"""
@@ -5054,6 +5071,31 @@ def library_fix(do_cat=True, do_season=True):
                 if n: seasoned += 1; logmsg("INFO", f"媒体库分季: {it['name']} 移动 {n} 个文件")
             except Exception as e:
                 errs.append(f"{it['name']}: {str(e)[:50]}")
+    specials = 0
+    if do_specials:
+        # 特典进 Season 00。**保留原文件名**:这些片子多半不在 TMDB 的特别篇列表里,
+        # 硬改成 S00E01 会被 Emby 匹配成别的特典、挂上错的标题;留原名至少名字是对的。
+        for it in a.get("extras", []):
+            base = remap.get(it["target"], it["target"])
+            if not os.path.isdir(base): continue
+            sd = os.path.join(base, "Season 00"); n = 0
+            try:
+                for f in it.get("names", []):
+                    if not os.path.isfile(os.path.join(base, f)): continue
+                    os.makedirs(sd, exist_ok=True)
+                    stem = os.path.splitext(f)[0]
+                    for g in [f] + [stem + e for e in (".srt", ".ass", ".sub", ".nfo")]:
+                        gp = os.path.join(base, g)
+                        if not os.path.isfile(gp): continue
+                        dst = os.path.join(sd, g)
+                        if os.path.exists(dst): continue
+                        os.rename(gp, dst)
+                    n += 1
+                if n:
+                    specials += 1
+                    logmsg("INFO", f"特典归位: {it['name']} → Season 00 ({n} 个)")
+            except Exception as e:
+                errs.append(f"{it['name']}: {str(e)[:50]}")
     if remap:
         try:
             c = db()
@@ -5063,7 +5105,7 @@ def library_fix(do_cat=True, do_season=True):
     _LIBAUDIT["d"] = None
     try: emby_refresh()
     except Exception: pass
-    return {"ok": True, "moved": moved, "seasoned": seasoned, "errs": errs}
+    return {"ok": True, "moved": moved, "seasoned": seasoned, "specials": specials, "errs": errs}
 
 def library_setcat(target, cat):
     """人工指定某部片的分类并立刻搬库。
