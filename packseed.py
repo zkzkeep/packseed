@@ -4153,6 +4153,27 @@ def _score_music(title, seeders, size):
     if size > 3 * 1024**3: sc -= 300           # 超大包(全收录那种)不好管理,也没法单张辅种
     return sc
 
+_CJKC = re.compile(r'[一-鿿]')
+# iTunes 会把版本信息缀在专辑名里(「虚度 - Single」「葉惠美 (Remastered)」),
+# 而种子名里没有这些词 —— 不剥掉,严格包含就永远对不上,只能靠模糊蒙,一蒙就错配。
+# 注意 **不剥 Live/演唱会**:那是另一张作品,剥了会让 Live 版去抢正传专辑的种子。
+_ALBSUF = re.compile(r"""\s*[-–—]\s*(?:single|ep|maxi\s*single)\s*$"""
+                     r"""|\s*[\(（](?:deluxe|remaster(?:ed)?|expanded|bonus|special|"""
+                     r"""anniversary|reissue|edition)[^)）]*[\)）]\s*$""", re.I)
+# Live 版和录音室版是两张不同的作品,名字却只差一个「(Live)」。
+# 不校验的话,「范特西 (Live)」会因为名字更长而先挑,把正传《范特西》的分轨种子抢走 ——
+# 用户拿到的是演唱会版,而正传只能退而求其次。两边的 Live 属性必须一致才算配上。
+_LIVEW = re.compile(r'live|unplugged|concert|演唱會|演唱会|巡迴|巡回|现场|現場', re.I)
+
+def _alb_core(x):
+    """剥掉版本后缀,最多剥三层(「X - Single (Remastered)」这种叠着的)。"""
+    x = (x or "").strip()
+    for _ in range(3):
+        y = _ALBSUF.sub("", x).strip()
+        if y == x or not y: break
+        x = y
+    return x
+
 def artist_albums(artist, log=lambda m: None):
     """歌手专辑总览:iTunes 年表打底 → 每张去 PT 找源 → 按年代排序 + 标推荐。"""
     sites = [x for x in CFG["MUSIC_SITES"].split(",") if x.strip()]
@@ -4169,26 +4190,44 @@ def artist_albums(artist, log=lambda m: None):
                      "url": r.get("downloadUrl") or r.get("guid") or ""})
     def norm(x): return re.sub(r'[^0-9a-z一-鿿]+', '', (x or "").lower())
     def hit(key, title):
-        """专辑名对不对得上。不能只用「包含」——iTunes 给的常是繁体(葉惠美/八度空間),
-           而种子名有简有繁,「十一月的蕭邦」和「十一月的萧邦」只差一个字就整张漏掉。
-           改成按字符重合率:繁简之间大部分字是相同的,0.75 的门槛能吃掉这类差异,
-           又不至于把「范特西」误配到「依然范特西」以外的东西上。"""
+        """专辑名对不对得上。严格包含是主路;模糊匹配**只对中文开放**。
+
+        为什么要模糊:iTunes 给的常是繁体(葉惠美/十一月的蕭邦),种子名简繁混用,
+        差一个字就整张漏。汉字之间繁简大多只差个别字,按字符重合能救回来。
+
+        为什么模糊路必须挡住拉丁字母:字母就那 26 个、在任何标题里都反复出现,
+        重合率对它没有区分力。实测「For The Children」的字母集能在
+        「齐秦-丝路1996-FLAC分轨-Chris@OpenCD」里凑齐 11/13 —— 纯噪音也能过线。
+        所以英文名一律只认严格包含,宁可漏也不能错配。"""
         t = norm(title)
         if key in t: return True
-        if len(key) < 3: return False
-        same = sum(1 for ch in set(key) if ch in t)
-        return same / len(set(key)) >= 0.75
-    rows = []
-    used = set()
+        kc = set(_CJKC.findall(key))
+        if len(kc) < 3: return False                 # 汉字太少,不够识别,只走包含
+        miss = sum(1 for ch in kc if ch not in t)
+        return miss <= max(1, int(len(kc) * 0.25))   # 短名允许缺 1 字(繁简),长名按比例
+    # iTunes 常把同一张碟拆成好几条(单曲版/EP 版/重发版),名字年份一模一样只是曲目数不同。
+    # 不先合掉,它们会各自去匹配、各自选中**同一个种子**,界面上就是两行一样的东西。
+    seen = {}
     for a in disc:
-        key = norm(a["album"])
+        k = (norm(_alb_core(a["album"])), a.get("year") or "")
+        if k in seen and (seen[k].get("tracks") or 0) >= (a.get("tracks") or 0): continue
+        seen[k] = a
+    disc = list(seen.values())
+
+    rows = []
+    used = set()          # 已被认领的种子。一个种子只能归一张专辑,否则重复推同一个 hash
+    # 长名字更具体,先让它挑,免得被短名字抢走(「虚度」不该抢走「虚度的季节」的种子)
+    for a in sorted(disc, key=lambda x: -len(norm(_alb_core(x["album"])))):
+        key = norm(_alb_core(a["album"]))
         if not key or len(key) < 2: continue
-        cands = [p for p in pool if hit(key, p["title"])]
+        lv = bool(_LIVEW.search(a["album"]))
+        cands = [p for p in pool if p["url"] not in used and hit(key, p["title"])
+                 and bool(_LIVEW.search(p["title"])) == lv]
         if not cands: continue
         for c in cands: c["_s"] = _score_music(c["title"], c["seeders"], c["size"])
         cands.sort(key=lambda c: -c["_s"])
         best = cands[0]
-        used.add(best["title"])
+        used.add(best["url"])
         rows.append({"album": a["album"], "year": a["year"], "date": a["date"],
                      "tracks": a["tracks"], "art": a["art"],
                      "rel": best["title"], "site": best["site"], "sizeh": best["sizeh"],
