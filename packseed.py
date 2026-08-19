@@ -5,7 +5,8 @@ PackSeed —— 辅种服务 (cross-seed 替代)
 按"大小粗筛 + 文件清单精确比对"辅种，绕过名字解析，能辅跨季合集。
 纯标准库：无第三方依赖。自带 sqlite 记录 + 网页仪表盘。
 """
-import os, re, json, time, base64, shutil, sqlite3, threading, urllib.request, urllib.parse, socket, traceback
+import os, re, json, time, base64, shutil, sqlite3, threading, urllib.request, urllib.parse, socket, traceback, hashlib
+import unicodedata, difflib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 socket.setdefaulttimeout(25)
@@ -80,6 +81,10 @@ CFG = {
     "FREE_OFFICIAL": os.environ.get("FREE_OFFICIAL", "0") == "1",   # 守候只抢官种(有些站保种考核只认官种)
     "BACKUP_KEEP":   int(os.environ.get("BACKUP_KEEP", "7")),       # 自动备份保留份数(每天备份 DB+settings)
     "LOG_KEEP_DAYS": int(os.environ.get("LOG_KEEP_DAYS", "30")),    # 日志保留天数,定期清理防膨胀
+    # 辅种每轮预算:一轮最多辅几份内容。首轮全库铺开时这个数直接决定 Prowlarr 的压力 ——
+    # 4000 份内容 × 几十个站,不设预算就是自己 DDoS 自己。默认 15,30 分钟一轮 ≈ 每天 720 份,
+    # 全库首轮约一周跑完;之后全覆盖的内容自动退出队列,是收敛的,不像老版每轮都全量重来。
+    "CROSSSEED_BUDGET": int(os.environ.get("CROSSSEED_BUDGET", "15")),
 }
 
 # ============ 设置中心: /config/settings.json 覆盖环境变量,网页可改,热生效 ============
@@ -245,7 +250,272 @@ def init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS keepseed(
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, size INTEGER, url TEXT,
         indexer TEXT, status TEXT, err TEXT, ts INTEGER)""")
+    try: c.execute("ALTER TABLE keepseed ADD COLUMN cid TEXT")   # 下完才知道身份,回填
+    except Exception: pass
+
+    # ===== 总账(§4):一份内容的唯一身份是文件清单指纹 cid,不是 info_hash =====
+    # 为什么:同一份数据在不同站有不同 info_hash,辅种成立的根据恰恰是「文件清单一模一样」。
+    # 用 info_hash 记账,天然表达不了「这是同一份内容」,只能靠裁字符串猜名字(已埋过雷)。
+    c.execute("""CREATE TABLE IF NOT EXISTS content(
+        cid TEXT PRIMARY KEY, name TEXT, size INTEGER, nfiles INTEGER,
+        role TEXT DEFAULT '', place TEXT DEFAULT '',
+        first_seen INTEGER, last_seen INTEGER)""")
+    # 同一份内容的多个实例:qb 里一个、tr 里一个、别站辅来的又一个,info_hash 各不相同
+    c.execute("""CREATE TABLE IF NOT EXISTS instance(
+        info_hash TEXT PRIMARY KEY, cid TEXT, client TEXT, site TEXT, path TEXT, ts INTEGER)""")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_instance_cid ON instance(cid)")
+    # 辅种覆盖矩阵:这才是「辅全了没有」的唯一依据。
+    # 关键在于区分 absent(问过确实没有) 和 pending(压根没问过) —— 老的 gap_report 是从
+    # matches 表反推的,两者混为一谈,所以注释里只能写「搜不到≠一定没有」。
+    c.execute("""CREATE TABLE IF NOT EXISTS coverage(
+        cid TEXT, site TEXT, state TEXT, ts INTEGER, note TEXT DEFAULT '',
+        PRIMARY KEY(cid, site))""")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_cov_state ON coverage(state)")
+    try: c.execute("ALTER TABLE torrents ADD COLUMN cid TEXT")   # 双写过渡:老表挂上新身份
+    except Exception: pass
+    try: c.execute("ALTER TABLE media ADD COLUMN cid TEXT")
+    except Exception: pass
+    try: c.execute("ALTER TABLE content ADD COLUMN xfer_fail INTEGER DEFAULT 0")  # 交棒连败次数
+    except Exception: pass
+    try: c.execute("ALTER TABLE content ADD COLUMN xfer_err TEXT DEFAULT ''")     # 最后一次失败原因
+    except Exception: pass
     c.commit(); c.close()
+
+# ============ §3 身份:一份内容「是什么」 ============
+# 观澜里同一份数据有五个身份(tr的种子名/qb的种子名/站点标题/媒体库路径/info_hash),
+# 过去靠裁字符串互相猜(见 process_completed 里的 name.rsplit)。真正的身份只有一个:
+# **文件清单**。同一份内容在不同站 info_hash 不同、名字不同,但相对路径+大小一模一样 ——
+# 这正是辅种能成立的根据,run_match 本来就在算(local_set),算完就扔了。这里把它留下来。
+
+def content_id(manifest):
+    """文件清单指纹。manifest: {相对路径: 字节数}。同一份内容在任何地方都算出同一个值。"""
+    items = sorted((str(p), int(sz)) for p, sz in dict(manifest).items())
+    raw = "\n".join("%s\t%d" % (p, sz) for p, sz in items)
+    return hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()[:16]
+
+def _rel_manifest(pairs, top):
+    """[(含顶层目录的路径, 大小)] → {相对路径: 大小}。
+       口径必须与 torrent_files() 完全一致(它按 BT 规范返回不含顶层的 path),
+       否则同一份内容从 tr / qb / 种子文件 三个来源会算出三个不同的 cid,整套账就废了。"""
+    out = {}; pre = (top or "") + "/"
+    for p, sz in pairs:
+        out[p[len(pre):] if p.startswith(pre) else p] = int(sz)
+    return out
+
+def manifest_tr(t):
+    """tr 种子 → 文件清单。tr 的 files[].name 含顶层目录。"""
+    return _rel_manifest([(f["name"], f["length"]) for f in t.get("files", [])], t.get("name", ""))
+
+def manifest_qb(qbfiles, name):
+    """qb 种子 → 文件清单。qb 的 files 接口返回相对 save_path 的路径,同样含顶层目录。"""
+    return _rel_manifest([(f["name"], f.get("size", 0)) for f in qbfiles], name)
+
+def manifest_torrent(data):
+    """.torrent 字节 → (顶层名, 文件清单)。直接复用既有的 bencode 解析。"""
+    return torrent_files(data)
+
+def _under(path, root):
+    """path 是否真的在 root 目录之下。
+
+       别用裸 startswith:root="/data/downloads/keepseed" 时,
+       "/data/downloads/keepseed-old" 也会 startswith 通过 —— 用在清退护栏上,
+       就是把不该删的目录当成保种库存删掉。必须卡住目录边界。"""
+    if not root or not path: return False
+    root = root.rstrip("/")
+    return path == root or path.startswith(root + "/")
+
+def _reg_domain(host):
+    """注册域:tracker.totheglory.im → totheglory.im。站点主站和 tracker 常不同子域。"""
+    parts = (host or "").split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (host or "")
+
+def match_site(raw, sites, urlmap=None):
+    """把「站的粗略名字」对齐到 Prowlarr 索引器名。
+
+       为什么非要有这一步:coverage 表的键必须全库统一。tracker 域名推出来的是 'ttg',
+       Prowlarr 里叫 'TTG' —— 差一个大小写,来源站就会被判成「从没问过」,每一轮都去问
+       一个自己本来就在做种的站。老代码在 gap_report 里用双向子串兜过这个坑,但没根治,
+       所以缺种报告的注释只能写「搜不到≠一定没有」。
+
+       ① 精确(忽略大小写) ② 按注册域匹配 Prowlarr 的 indexerUrls ③ 双向子串兜底"""
+    r = (raw or "").strip()
+    if not r: return ""
+    low = {s.lower(): s for s in sites}
+    if r.lower() in low: return low[r.lower()]
+    if urlmap:
+        d = _reg_domain(r.lower())
+        if d in urlmap: return urlmap[d]
+        for dom, nm in urlmap.items():
+            if r.lower() in dom or _reg_domain(dom) == d: return nm
+    for s in sites:
+        sl = s.lower()
+        if sl in r.lower() or r.lower() in sl: return s
+    return r          # 认不出来就保留原样,别硬塞给某个站
+
+_SITEURL = {"t": 0, "d": {}, "names": []}
+def site_urlmap():
+    """{注册域: 索引器名} + 索引器名单,缓存 5 分钟。靠 Prowlarr 自己的配置说话。"""
+    if _SITEURL["d"] and time.time() - _SITEURL["t"] < 300:
+        return _SITEURL["d"], _SITEURL["names"]
+    d = {}; names = []
+    try:
+        for i in prowlarr_indexers():
+            nm = i.get("name") or ""
+            if not nm: continue
+            names.append(nm)
+            for u in (i.get("indexerUrls") or []) + ([i.get("baseUrl")] if i.get("baseUrl") else []):
+                try: h = urllib.parse.urlparse(u).hostname or ""
+                except Exception: continue
+                if h: d[_reg_domain(h.lower())] = nm
+    except Exception:
+        return _SITEURL["d"], _SITEURL["names"]
+    _SITEURL.update(t=time.time(), d=d, names=names)
+    return d, names
+
+# ============ §4 总账:一份内容「现在怎么样」 ============
+# 三个**正交**的维度,过去被塞进一个 status 字段(torrents/media/keepseed 各一套,互不相干):
+#   role  角色 —— library(媒体库资产,要入库刮削) / stock(保种库存,只做种可淘汰)
+#   place 位置 —— 在 qb / 在 tr / 两边都有 / 数据没了
+#   cov   辅种覆盖 —— 每个站一行,单独记
+# 正交的东西塞一个字段,就会出现「保种种子转完 tr 之后 status 该写什么」这种答不上来的问题。
+
+def _led(sql, args=(), many=None, fetch=""):
+    """账本层唯一的 SQL 执行器。账本函数一律走这里,账本之外一律不直连这三张表 ——
+       这是「唯一 SQL 出口」能被 grep 查出来的前提。"""
+    c = db()
+    try:
+        cur = c.executemany(sql, many) if many is not None else c.execute(sql, args)
+        r = cur.fetchall() if fetch == "all" else (cur.fetchone() if fetch == "one" else None)
+        c.commit(); return r
+    finally:
+        c.close()
+
+def led_touch(cid, name="", size=0, nfiles=0):
+    """登记/刷新一份内容。名字只在第一次登记时写,后面改名不覆盖(展示名要稳定)。"""
+    if not cid: return
+    now = int(time.time())
+    _led("""INSERT INTO content(cid,name,size,nfiles,first_seen,last_seen) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(cid) DO UPDATE SET last_seen=excluded.last_seen,
+              size=CASE WHEN content.size=0 THEN excluded.size ELSE content.size END,
+              nfiles=CASE WHEN content.nfiles=0 THEN excluded.nfiles ELSE content.nfiles END""",
+         (cid, name[:200], int(size or 0), int(nfiles or 0), now, now))
+
+def led_bind(info_hash, cid, client="", site="", path=""):
+    """把一个 info_hash 绑到内容上。同一份内容会有多个实例,这是多对一。"""
+    if not info_hash or not cid: return
+    _led("""INSERT INTO instance(info_hash,cid,client,site,path,ts) VALUES(?,?,?,?,?,?)
+            ON CONFLICT(info_hash) DO UPDATE SET cid=excluded.cid, client=excluded.client,
+              site=CASE WHEN excluded.site!='' THEN excluded.site ELSE instance.site END,
+              path=CASE WHEN excluded.path!='' THEN excluded.path ELSE instance.path END,
+              ts=excluded.ts""",
+         (info_hash.lower(), cid, client, site, path, int(time.time())))
+
+def led_cid(info_hash):
+    r = _led("SELECT cid FROM instance WHERE info_hash=?", ((info_hash or "").lower(),), fetch="one")
+    return r[0] if r else ""
+
+def led_role(cid, role):
+    """角色只升不降:一份内容一旦是媒体库资产,后来又被保种流程碰到,不能被降级成 stock。"""
+    if not cid or not role: return
+    cur = _led("SELECT role FROM content WHERE cid=?", (cid,), fetch="one")
+    if cur and cur[0] == "library" and role != "library": return
+    _led("UPDATE content SET role=? WHERE cid=?", (role, cid))
+
+def led_place(cid, place):
+    if not cid or not place: return
+    _led("UPDATE content SET place=? WHERE cid=?", (place, cid))
+
+_CONTENT_COLS = ["cid","name","size","nfiles","role","place","first_seen","last_seen","xfer_fail","xfer_err"]
+def led_get(cid):
+    """⚠️ 列清单必须和这里的 SELECT 同步。曾经漏掉后加的 xfer_fail,
+       调用方 g.get("xfer_fail") 永远拿到 None,交棒失败上限那道闸门直接失效 ——
+       类型没错、不抛异常、日志也正常,只有真跑一遍才看得出来。"""
+    r = _led("SELECT " + ",".join(_CONTENT_COLS) + " FROM content WHERE cid=?", (cid,), fetch="one")
+    return dict(zip(_CONTENT_COLS, r)) if r else None
+
+# ---- 覆盖矩阵:辅种「辅全了没有」的唯一依据 ----
+# state 取值:
+#   source   这份内容本来就是从这个站下的(不是辅上去的)
+#   seeding  已经在这个站做种(辅种成功/加了 tracker)
+#   absent   问过了,这个站确实没有 —— 带时间戳,过期会自动转回 pending 再问一次
+#   error    问的时候出错了(cookie 过期/站点抽风) —— 下一轮必重试,不能跟 absent 混为一谈
+#   banned   这个站 ban 了 tr 客户端,注了也是废种,永远别问
+def led_cov_set(cid, site, state, note=""):
+    if not cid or not site: return
+    _led("""INSERT INTO coverage(cid,site,state,ts,note) VALUES(?,?,?,?,?)
+            ON CONFLICT(cid,site) DO UPDATE SET state=excluded.state, ts=excluded.ts, note=excluded.note""",
+         (cid, site, state, int(time.time()), (note or "")[:80]))
+
+def led_cov_get(cid):
+    """{站名: (state, ts, note)}"""
+    return {r[0]: (r[1], r[2], r[3]) for r in
+            (_led("SELECT site,state,ts,note FROM coverage WHERE cid=?", (cid,), fetch="all") or [])}
+
+COV_STALE_DAYS = 30      # 「问过说没有」的保质期:站点会补种,过了这么久值得再问一次
+def led_cov_pending(cid, all_sites, stale_days=COV_STALE_DAYS):
+    """这份内容**还该问哪些站**。辅种作业的驱动力就是把这个列表消成空。
+       老代码没有这个概念,只能靠「6 小时冷却」拍脑袋整个种子跳过 ——
+       结果是:辅到一个站就 break,剩下几十个站永远没问过,而且没人知道漏了谁。"""
+    cur = led_cov_get(cid)
+    stale = int(time.time()) - stale_days * 86400
+    out = []
+    for s in all_sites:
+        st = cur.get(s)
+        if st is None: out.append(s)                              # 从没问过
+        elif st[0] == "error": out.append(s)                      # 上次出错,必重试
+        elif st[0] == "absent" and st[1] < stale: out.append(s)   # 问过没有,但过期了
+    return out
+
+def led_xfer_fail(cid, err):
+    """交棒失败记一笔。连败到上限就不再自动重试 —— 一个坏种子不该每分钟重试到天荒地老。"""
+    if not cid: return
+    _led("UPDATE content SET xfer_fail=IFNULL(xfer_fail,0)+1, xfer_err=? WHERE cid=?", ((err or "")[:80], cid))
+
+def led_xfer_reset(cid=""):
+    """人工重置交棒失败计数(面板「重试」按钮)。清 _QB_SETTLED 让下一轮重新尝试。"""
+    if cid: _led("UPDATE content SET xfer_fail=0, xfer_err='' WHERE cid=?", (cid,))
+    else:   _led("UPDATE content SET xfer_fail=0, xfer_err='' WHERE IFNULL(xfer_fail,0)>0")
+    try: _QB_SETTLED.clear()
+    except Exception: pass
+
+def led_xfer_ok(cid):
+    if not cid: return
+    _led("UPDATE content SET xfer_fail=0, xfer_err='', place='tr' WHERE cid=?", (cid,))
+
+def led_xfer_stuck(limit=5):
+    """卡住的交棒:下完了但送不进 tr 的。老版失败只写一行日志,面板上根本看不见。"""
+    rows = _led("SELECT cid,name,xfer_fail,xfer_err FROM content WHERE IFNULL(xfer_fail,0)>0 "
+                "ORDER BY xfer_fail DESC LIMIT 50", fetch="all") or []
+    return [{"cid": r[0], "name": r[1], "fail": r[2], "err": r[3], "gaveup": r[2] >= limit} for r in rows]
+
+def led_has_tr(cid):
+    """tr 那边接手了没有 —— 交棒该不该做,从事实推导,不靠队列表。
+       队列表会和现实脱节:转成功但没来得及更新队列,下一轮就重复转。"""
+    r = _led("SELECT 1 FROM instance WHERE cid=? AND client='tr' LIMIT 1", (cid,), fetch="one")
+    return bool(r)
+
+def led_recent(limit=120, skip_role=""):
+    """最近登记的内容(总账视图)。缺种报告之类的读取一律走这里,别自己拼 SQL。"""
+    sql = "SELECT cid,name,size,role,place FROM content"
+    args = []
+    if skip_role:
+        sql += " WHERE IFNULL(role,'') != ?"; args.append(skip_role)
+    sql += " ORDER BY last_seen DESC LIMIT ?"; args.append(int(limit))
+    return [{"cid": r[0], "name": r[1], "size": r[2], "role": r[3], "place": r[4]}
+            for r in (_led(sql, tuple(args), fetch="all") or [])]
+
+def led_any_hash(cid):
+    """随便取这份内容的一个 info_hash(界面上要用它调别的接口)。"""
+    r = _led("SELECT info_hash FROM instance WHERE cid=? LIMIT 1", (cid,), fetch="one")
+    return r[0] if r else ""
+
+def led_cov_stats():
+    """全库覆盖概览:多少内容辅全了、还欠多少站没问。"""
+    rows = _led("SELECT state, COUNT(*) FROM coverage GROUP BY state", fetch="all") or []
+    d = {k: v for k, v in rows}
+    ncontent = (_led("SELECT COUNT(*) FROM content", fetch="one") or [0])[0]
+    return {"content": ncontent, "seeding": d.get("seeding", 0) + d.get("source", 0),
+            "absent": d.get("absent", 0), "error": d.get("error", 0), "banned": d.get("banned", 0)}
 
 _WECOM = {"tok": "", "exp": 0}
 _NQUEUE = []   # 未送达通知队列,后台线程重投
@@ -500,8 +770,14 @@ def _chat_search(q):
     try:
         name, year = split_query(q)
         anchor = query_anchor(name, year)
-        qs = [name] + ([anchor["altq"]] if (anchor and CFG["SEARCH_ALIAS"] and anchor.get("altq")) else [])
-        d = search_group(q, prowlarr_search_fan(qs), anchor=anchor)
+        # 手机上发片名等结果:一次扇出,不像面板那样分两轮。只补一个别名 ——
+        # 同站请求 Prowlarr 会排队,词数直接乘在墙上时间上。altqs[0] 已按命名体系挑过。
+        alts = (anchor or {}).get("altqs") or []
+        qs = [name] + (alts[:1] if (anchor and CFG["SEARCH_ALIAS"]) else [])
+        pol = POLICY["find"]
+        d = search_group(q, prowlarr_search_fan(qs, per_timeout=pol["timeout"],
+                                                deadline=pol["deadline"], workers=pol["workers"]),
+                         anchor=anchor)
         gs = list(d.get("groups") or [])[:8]
         if not gs:
             for x in (d.get("other") or [])[:5]:
@@ -776,6 +1052,23 @@ def extract_english(name):
     # 中文名搜不到时的英文兜底
     return _english_prefix(name)[:40]
 
+def extract_season_query(name):
+    """保留英文剧名的季号，供辅种精确检索。
+
+    ``extract_english`` 面向媒体识别，遇到 S01 会主动截断；辅种则恰恰
+    需要这个季号，否则搜索会混入整部剧的各季、合集和重编码版本。
+    """
+    m = re.search(r"(?i)([A-Za-z][A-Za-z0-9._ -]{1,100}?[._ -]S\d{1,2}(?:[._ -]E\d{1,2})?)", name)
+    return m.group(1).strip(" ._-")[:80] if m else ""
+
+def cross_seed_queries(name):
+    """从精确到宽泛的辅种搜索词，去重并丢弃空值。"""
+    out = []
+    for q in (extract_season_query(name), extract_query(name), extract_english(name)):
+        if q and q.lower() not in {x.lower() for x in out}:
+            out.append(q)
+    return out
+
 # ============ Transmission RPC ============
 class TR:
     def __init__(s):
@@ -804,9 +1097,18 @@ class TR:
                     raise RuntimeError("Transmission 认证失败,检查 TR_USER/TR_PASS")
                 raise
         raise RuntimeError("tr rpc fail")
-    def torrents(s):
-        r = s.call("torrent-get", {"fields":["hashString","name","totalSize","files","downloadDir","trackers","percentDone"]})
+    TFULL = ["hashString","name","totalSize","files","downloadDir","trackers","percentDone"]
+    TLITE = ["hashString","name","totalSize","downloadDir","percentDone"]
+    def torrents(s, fields=None):
+        """默认拉全字段(含 files)。4000+ 个种子的文件清单是几十 MB 的 JSON,
+           只是想看看有哪些种子时务必传 TLITE —— 辅种调度就靠这个把每轮开销压下来。"""
+        r = s.call("torrent-get", {"fields": fields or TR.TFULL})
         return r.get("arguments", {}).get("torrents", [])
+    def torrent(s, ih):
+        """按 info_hash 拉单个种子的全字段(要算文件清单指纹时才拉)。"""
+        r = s.call("torrent-get", {"ids": [ih], "fields": TR.TFULL})
+        ts = r.get("arguments", {}).get("torrents", [])
+        return ts[0] if ts else None
     def add(s, torrent_bytes, download_dir):
         return s.call("torrent-add", {"metainfo":base64.b64encode(torrent_bytes).decode(),"download-dir":download_dir,"paused":False})
 
@@ -937,6 +1239,10 @@ def meta_title_cn(n):
     first = re.split(r'[._]', n, maxsplit=1)[0]; first = re.split(r'[￡@]', first)[0].strip().strip('[]【】()（） ')
     if CJK.search(first):
         t = re.split(r'(S\d{1,2}|第[\d一二三四五六七八九十]+季|Season|E\d{1,3}|\d+集)', first, flags=re.I)[0]
+        # 文件夹经常已经被错误刮成「片名 (年份)」。年份不是片名的一部分，带着它去
+        # TMDB 搜会把同名的老电影当成唯一候选，剧集即使有 E01-E32 也救不回来。
+        # first.strip() 会先去掉末尾右括号，因此这里右括号必须是可选的。
+        t = re.sub(r'\s*[（(]\s*(?:19|20)\d{2}\s*[）)]?\s*$', '', t)
         t = re.sub(r'[A-Za-z].*$','',t).strip() if CJK.search(t) else t
         if t.strip(): return t.strip()
     return ""
@@ -1008,16 +1314,19 @@ def _tmdb_search(q, tv_only=False):
 def _ryear(r): return (r.get("release_date") or r.get("first_air_date") or "")[:4]
 
 _TMDB_CACHE = {}
-def tmdb_match(name):
-    hit = _TMDB_CACHE.get(name)
+def tmdb_match(name, force_tv=False):
+    # 同一个标题在「普通判断」和「文件已证明是剧集」两种上下文不能共用缓存：
+    # 否则先命中过电影的结果会污染随后按文件清单发起的纠正识别。
+    cache_key = (name, bool(force_tv))
+    hit = _TMDB_CACHE.get(cache_key)
     if hit and time.time() - hit[1] < 21600:
         return hit[0]
-    m = _tmdb_match_raw(name)
+    m = _tmdb_match_raw(name, force_tv=force_tv)
     if len(_TMDB_CACHE) > 2000: _TMDB_CACHE.clear()
-    _TMDB_CACHE[name] = (m, time.time())
+    _TMDB_CACHE[cache_key] = (m, time.time())
     return m
 
-def _tmdb_match_raw(name):
+def _tmdb_match_raw(name, force_tv=False):
     """解析 name → 匹配 TMDB。返回 dict(mtype,id,tmdb_name,year,conf,q) 或 None。结果缓存6小时。"""
     if not CFG["TMDB_KEY"]: return None
     tc, te = _anime_title(name)          # 番组命名优先(动漫)
@@ -1025,8 +1334,8 @@ def _tmdb_match_raw(name):
         tc, te = meta_title_cn(name), meta_title_en(name)
     year = meta_year(name)
     # 名字里带集数/季标记 → 明确是剧集，别让剧场版/总集篇/舞台剧抢走匹配
-    want_tv = bool(re.search(r'\[\d{1,4}(-\d{1,4})?(v\d)?\]|第\d{1,4}[话話集]|[-–]\s*\d{1,4}\s*[\[\(]|'
-                             r'S\d{1,2}(?!\d)|E\d{1,3}|\d+集', name) or meta_is_tv(name))
+    want_tv = force_tv or bool(re.search(r'\[\d{1,4}(-\d{1,4})?(v\d)?\]|第\d{1,4}[话話集]|[-–]\s*\d{1,4}\s*[\[\(]|'
+                                        r'S\d{1,2}(?!\d)|E\d{1,3}|\d+集', name) or meta_is_tv(name))
     for q in [x for x in (tc, te) if x]:
         cand = _tmdb_search(q, tv_only=want_tv)
         if not cand: continue
@@ -1134,13 +1443,6 @@ def split_query(q):
 def _norm(s):
     return re.sub(r'[^0-9a-z一-鿿]+', '', (s or "").lower())
 
-def _is_latin(s):
-    """是不是拉丁字母写的名字。「不含汉字」≠「拉丁」——假名/西里尔/谚文都不含汉字,
-       拿它们去 PT 站搜纯属空转,所以这里按字母实际构成判定。"""
-    letters = [c for c in (s or "") if c.isalpha()]
-    if len(letters) < 2: return False
-    return sum(1 for c in letters if "a" <= c.lower() <= "z") / len(letters) >= 0.8
-
 def _alias_hit(title, alias):
     """种子标题是否属于这批别名。中文按归一化子串;英文必须按词边界,
        否则 Sakra 会认领 Sakrament、Dark 会认领 Darkest —— 这类子串陷阱是误配大户。"""
@@ -1180,6 +1482,62 @@ def query_anchor(name, year="", filt=""):
     _ANCHOR_CACHE[ck] = (a, time.time())
     return a
 
+# ---- §7 查询理解:别名扇出该扇哪几个词 ----
+def _script_of(s):
+    """这个名字用的哪套文字。同一套文字里的多个拼写多半是近似重复,扇出去等于白花一波。
+
+       ⚠️ 判定必须看**字符实际属于哪个区**,不能拿「不含汉字」当「是英文」——
+       假名/谚文/西里尔都不含汉字,当成英文名扇出去,就是让几十个站白搜一遍假名。"""
+    if re.search(r'[぀-ゟ゠-ヿ]', s or ""): return "kana"      # 日文假名
+    if re.search(r'[가-힯]', s or ""): return "hangul"                 # 韩文谚文
+    if re.search(r'[一-鿿]', s or ""): return "han"                    # 汉字
+    if re.search(r'[Ѐ-ӿ]', s or ""): return "cyrl"
+    if re.search(r'[A-Za-z]', s or ""): return "latin"
+    return "other"
+
+def _norm_alias(s):
+    """归一化:剥变音符、小写、只留字母数字和 CJK。
+       Shiroi kyotô 和 Shiroi Kyoto 归一化之后就认得出是同一个词。"""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r'[^a-z0-9一-鿿぀-ヿ가-힯]', '', s.lower())
+
+def alias_plan(alias, qname, k=2):
+    """从别名池里挑 k 个**真正不同的召回入口**。
+
+       为什么不能随手挑:TMDB 的 alternative_titles 里绝大多数是近似重复 ——
+       《白色巨塔》挑出来的是 Shiroi Kyotou / Shiroi kyotô / Shiroi Kyoto,
+       同一种罗马字拼法的三个变体。三个词扇出去实测墙上时间 +28%,
+       只多认领 0~5 条,基本是纯浪费(所以「别名扇出」这一项一直没敢做)。
+
+       做法:先按文字分桶(汉字/假名/谚文/拉丁),桶内再按拼写相似度聚类,
+       每类只留一个代表,然后**在各桶之间轮转取** —— 保证挑出来的是不同入口,
+       而不是同一个入口的三种拼写。与原查询同文字的桶排最后(那多半是重复)。"""
+    qn = _norm_alias(qname); qs = _script_of(qname)
+    buckets = {}
+    for a in alias or []:
+        a = (a or "").strip()
+        if not (2 <= len(a) <= 40): continue
+        na = _norm_alias(a)
+        if not na or na == qn: continue                 # 跟原查询等价,搜了也是重复
+        buckets.setdefault(_script_of(a), []).append((a, na))
+    picks = {}
+    for sc, items in buckets.items():
+        reps = []
+        for a, na in sorted(items, key=lambda x: (len(x[1]), x[0])):   # 短的优先:长的常带副标题
+            if any(difflib.SequenceMatcher(None, na, rn).ratio() > 0.8 for _, rn in reps):
+                continue                                # 拼写近似 → 同一个入口,不重复扇
+            reps.append((a, na))
+        picks[sc] = [a for a, _ in reps]
+    order = sorted(picks, key=lambda x: (x == qs, x))   # 同文字的排最后
+    out = []
+    for rnd in range(4):
+        for sc in order:
+            if len(picks[sc]) > rnd:
+                out.append(picks[sc][rnd])
+                if len(out) >= k: return out
+    return out
+
 def _query_anchor_raw(name, year="", filt=""):
     want = {"movie": "movie", "tv": "tv", "anime": "tv"}.get(filt, "")
     cand = _tmdb_search(name, tv_only=(want == "tv"))
@@ -1212,17 +1570,13 @@ def _query_anchor_raw(name, year="", filt=""):
     # 补搜词:用户敲中文就补个拉丁名,敲英文就补个中文名 —— 站里同一部剧两种命名都有,只搜一种必漏。
     # 必须显式判「是不是拉丁字母」,不能拿「没有汉字」当拉丁:CJK 只覆盖汉字区(U+4E00-9FFF),
     # 纯假名的日译名(こいのスケッチ…)不含汉字,会被当成英文名选中,白白让 66 个站搜一遍假名。
-    qcjk = bool(CJK.search(name))
-    altq = ""
-    for a in sorted(alias, key=lambda x: -len(x)):
-        if _norm(a) == nq or not (2 <= len(a) <= 40): continue
-        if (_is_latin(a) if qcjk else bool(CJK.search(a))):
-            altq = a; break
+    altqs = alias_plan(alias, name, k=2)
     return {"mtype": mt, "id": r.get("id"),
             "name": (r.get("name") or r.get("title") or name), "year": _ryear(r),
             "poster": r.get("poster_path") or "", "overview": r.get("overview") or "",
             "anime": 16 in (r.get("genre_ids") or []),
-            "alias": sorted(alias, key=lambda x: -len(x)), "altq": altq,
+            "alias": sorted(alias, key=lambda x: -len(x)),
+            "altqs": altqs, "altq": altqs[0] if altqs else "",
             "qname": name, "qyear": year}
 
 def meta_is_music(n):
@@ -1248,6 +1602,22 @@ def walk_files(path):
         for f in fs:
             ap = os.path.join(root, f); out.append((ap, os.path.relpath(ap, path)))
     return out
+
+def files_indicate_tv(files):
+    """实际文件清单优先于种子标题：两个以上不同的 E## 视频就是电视剧。
+
+    搜索标题可能是错误的历史目录名，或只写了英文片名，不能据此把整季剧集
+    错送进电影库。只接受至少两集，避免花絮/单个试播集把电影误判成电视剧。
+    """
+    episodes = set()
+    for _src, rel in files:
+        stem, ext = os.path.splitext(os.path.basename(rel))
+        if ext.lower() not in _VIDEO_EXT:
+            continue
+        m = re.search(r'(?:\bS(\d{1,2})[ ._-]?)?\bE(\d{1,3})\b', stem, re.I)
+        if m:
+            episodes.add((int(m.group(1) or 1), int(m.group(2))))
+    return len(episodes) >= 2
 
 # ============ 整理入库（硬链接） + 转种 + 通知 Emby ============
 def _safe(s): return re.sub(r'[\\/:*?"<>|]+',' ',(s or "")).strip()
@@ -1302,6 +1672,129 @@ def _is_pack(t):
     if re.search(r'Season\s*\d{1,2}\s*[-~]\s*\d{1,2}', t, re.I): return True
     if re.search(r'[0-9一二三四五六七八九十]{1,3}\s*[-~]\s*[0-9一二三四五六七八九十]{1,3}\s*季', t): return True
     return False
+
+
+# ==================== 搜索内核 ====================
+# 全站**唯一**解析种子名的地方,也是**唯一**给种子打分的地方。
+#
+# 之前这两件事各有三份实现:交互搜索只按 seeders 排、榜单批量走 _pick_release、
+# 音乐走 _score_music。同一个「哪个版本更好」有三个互不相同的答案,
+# 加一个需求得改三处、改漏一处就出怪事 —— 这才是「补丁摞补丁」的根,
+# 不是某一个具体 bug。合并成「解析 → 打分」两层后,新需求只会落在一处:
+# 要么给 parse_release 加一个字段,要么给某个 intent 调一次权重。
+_RE_RES   = re.compile(r'\b(2160p|1080p|720p|480p|4k)\b', re.I)
+_RE_SRC   = re.compile(r'\b(remux|blu-?ray|bd-?rip|web-?dl|web-?rip|hdtv|dvd-?rip|dvd)\b', re.I)
+_RE_CODEC = re.compile(r'\b(x265|h\.?265|hevc|x264|h\.?264|avc)\b', re.I)
+_RE_HDR   = re.compile(r'\b(hdr10\+?|hdr|dolby\s*vision|dovi)\b', re.I)
+
+# 中文音轨。**最容易错的地方是把字幕当音轨** ——「中英双语字幕」「中字」「简繁」
+# 说的都是字幕,认成国语会让人白高兴一场,点进去还是原声。所以「双语」必须排除后面跟「字幕」的写法。
+# 粤语单列:它是中文,但内地用户要的多半是国语,排序时要比国语低一档。
+_ZH_GUO  = re.compile(r'国语|國語|国配|國配|普通话|普通話|中文配音|中配|\bMandarin\b', re.I)
+_ZH_DUAL = re.compile(r'国粤|國粵|粤国|粵國|国英|國英|国日|國日|国韩|國韓|双音轨|雙音軌'
+                      r'|(?:双语|雙語|双語)(?!\s*字幕)', re.I)
+_ZH_YUE  = re.compile(r'粤语|粵語|\bCantonese\b', re.I)
+# 「4Audio」「3声轨」这类只说明音轨条数,没说是什么语言。但中文站上 3 条以上的碟
+# 基本就是 英语+国语+粤语/台配 —— 实测 Zootopia 那个 4Audio 的碟确实带国语。
+# 这是**推断不是明写**,所以单开一档「多音轨」提示,不冒充「国语」:
+# 规律五说了,判不出就别硬判,但也不能默默扔掉,得让人看见自己去确认。
+_ZH_MULTI = re.compile(r'\b([3-9])\s*Audio\b|[三四五六3-9]\s*[声聲]轨|多国语言|多國語言|多语言|多語言', re.I)
+
+def parse_release(it):
+    """一条搜索结果 → 补全结构化字段(原地改并返回)。it 至少要有 title。
+
+       只解析**读得出来的**,读不出来一律留 0/空串/None ——
+       猜出来的字段比没有更糟:季号猜错会把三季塞进一季,组名猜错会推荐一个叫「1080p」的组。"""
+    t = it.get("title") or ""
+    it["pack"] = _is_pack(t)                                  # 跨季合集
+    it["ss"]   = 0 if it["pack"] else (_season_of(t) or 0)    # 季号,0=判不出
+    it["grp"]  = _relgrp(t)                                   # 制作组,""=判不出
+    m = _RE_RES.search(t); r = (m.group(1).lower() if m else "")
+    it["res"]  = {"2160p": 2160, "4k": 2160, "1080p": 1080, "720p": 720, "480p": 480}.get(r, 0)
+    m = _RE_SRC.search(t)
+    it["src"]  = re.sub(r'[-\s]', '', m.group(1).lower()) if m else ""
+    m = _RE_CODEC.search(t)
+    c = re.sub(r'[.\s]', '', m.group(1).lower()) if m else ""
+    it["codec"] = "x265" if c in ("x265", "h265", "hevc") else ("x264" if c in ("x264", "h264", "avc") else "")
+    it["hdr"]  = bool(_RE_HDR.search(t))
+    # zhrank: 3=中外双语(最优:两条音轨都在,想听哪个听哪个)
+    #         2=只有国语  1=粤语/只知道是多音轨  0=没有中文音轨(或没标)
+    if _ZH_DUAL.search(t):
+        it["zhkind"], it["zhrank"] = "双语", 3
+    elif _ZH_GUO.search(t):
+        it["zhkind"], it["zhrank"] = "国语", 2
+    elif _ZH_YUE.search(t):
+        it["zhkind"], it["zhrank"] = "粤语", 1
+    elif _ZH_MULTI.search(t):
+        it["zhkind"], it["zhrank"] = "多音轨?", 1
+    else:
+        it["zhkind"], it["zhrank"] = "", 0
+    it["zhaud"] = it["zhrank"] > 0
+    # 音乐维度(剧集/电影用不上,但解析一次比三处各判一次强)
+    it["lossless"]  = bool(_LOSS_RE.search(t))
+    it["split"]     = True if _SPLIT_RE.search(t) else (False if _WHOLE_RE.search(t) else None)
+    it["single"]    = bool(_SINGLE_RE.search(t))
+    it["nonstudio"] = bool(_NONSTUDIO.search(t))
+    return it
+
+
+def score_release(r, intent="browse", prefer_4k=False):
+    """按**用途**打分。同一个种子在不同用途下该排第几,本来就不是一回事:
+
+       browse  人在屏幕前挑 —— 做种数(公认度)是主序,画质只在 ±3 分内微调。
+               不能替人做主:他可能就是想要那个 4K 原盘。
+       collect 批量收藏、无人值守 —— 必须自己拿主意:体积落窗口、优先 x265、认分辨率偏好。
+       music   收藏音乐 —— 分轨/正传/无损是硬指标,做种数退化成公认度的代理。"""
+    sd = float(r.get("seeders") or 0)
+    if intent == "music":
+        sc = sd
+        if r.get("split") is True:    sc += 500   # 分轨:Navidrome 才认得出单曲,硬需求
+        elif r.get("split") is False: sc -= 400   # 整轨:一张碟一个大文件+CUE,播放器难用
+        if re.search(r'\bFLAC\b', r.get("title") or "", re.I): sc += 120
+        if r.get("nonstudio"): sc -= 250          # 精选/Live 往后排,正传优先
+        sz = r.get("size") or 0
+        if r.get("single") or sz < 120 * 1024**2: sc -= 600
+        if sz > 3 * 1024**3: sc -= 300            # 超大合集不好管,也没法单张辅种
+        return sc
+    if intent == "collect":
+        sc = sd
+        # 批量下载没人盯着,必须自己拿主意:有国语的直接顶上去。
+        # 交互搜索**不**在这里加分 —— 那边人在屏幕前,把 500 做种的原盘挤到国语版后面
+        # 是替人做主。国语优先在呈现层做:排前面 + 打标 + 可筛选,看得见也关得掉。
+        if CFG.get("PREFER_ZH_AUDIO") and r.get("zhrank"):
+            sc += {3: 250, 2: 200}.get(r["zhrank"], 60)
+        if r.get("codec") == "x265": sc += 30
+        if prefer_4k and r.get("res") == 2160: sc += 200
+        elif not prefer_4k and r.get("res") == 1080: sc += 50
+        return sc
+    sc = sd + {2160: 3, 1080: 2, 720: 1}.get(r.get("res") or 0, 0)
+    if r.get("codec") == "x265": sc += 0.5
+    if r.get("src") in ("remux", "bluray"): sc += 0.5
+    return sc
+
+
+def dedupe_releases(rs):
+    """同一个发布往往好几个站都有,列表里就是连着好几行几乎一样的名字
+       (实测绝命毒师第 1 季 11 条里有 3 条都是同一个 HHWEB 2160p)。
+       合成一行、其余站收进 alts —— 列表短一半,「哪些版本可选」才看得清。
+
+       **不丢数据**:alts 里保留每个站的完整信息,想换站下载仍然拿得到。
+       抠不出制作组的不合并 —— 没有组名的指纹区分度不够,宁可多列几行也不能合错。"""
+    rs = sorted(rs, key=lambda x: -score_release(x, "browse"))
+    idx, out = {}, []
+    for x in rs:
+        gp = (x.get("grp") or "").lower()
+        if not gp:
+            out.append(x); continue
+        # 指纹带体积:同组同季但 2160p 原盘和 1080p 重编码是两个东西,体积差得很远
+        fp = (gp, x.get("ss", 0), bool(x.get("pack")), x.get("res", 0),
+              x.get("src", ""), x.get("codec", ""), round((x.get("size") or 0) / (50 * 1024**2)))
+        if fp not in idx:
+            idx[fp] = len(out); x["alts"] = []; out.append(x)
+        else:
+            out[idx[fp]]["alts"].append({"site": x.get("site", ""), "seeders": x.get("seeders", 0),
+                                         "url": x.get("url", ""), "info": x.get("info", "")})
+    return out
 
 def organize_files(files, m, cat, name_hint=""):
     """files: [(绝对源路径, 相对路径)]；按类型硬链接进媒体库。返回(目标目录, 链接数)
@@ -1645,67 +2138,137 @@ def hold_media(ih, name, cat, reason):
     logmsg("WARN", f"整理待确认({reason}): {name[:44]}")
     notify("⚠️ 入库待确认", f"{name[:56]}\n{reason},去面板『整理入库』填片名或TMDB id一键入库")
 
-def transfer_to_tr(qb, ih, name, save_path):
-    """qb→tr 转种：tr 指向同一数据目录，校验后从 qb 删任务(数据保留)"""
+# ⚠️ 名词澄清 —— 观澜里有**三件不同的事**都被叫过「转种」,这是概念混乱最大的一处来源:
+#
+#   交棒  handoff    qb 下完 → tr 接手长期做种。同一份数据换个客户端,**站点不变、不跨站**。
+#                    PT 规矩是一个种子只能在一个客户端做种,所以 tr 接手后必须从 qb 删任务
+#                    (留数据)。**不受禁转标记约束** —— 压根没换站,谈不上转。就是本函数。
+#   转发种 repost    把 A 站下到的资源发布到 B 站。**这才是 PT 圈说的「转种」**,
+#                    受禁转红线硬拦截(在 xfer_pack 里拦),转了要被请喝茶。
+#   辅种  crossseed  同一份数据别站已有种子,把那个站的 tracker 挂上去一起做种。
+#                    不产生新发布,不算转发。crossseed_one 干的事。
+#
+# 三者的风险等级完全不同,合在一个词里迟早出事。界面文案也照这个分。
+XFER_FAIL_LIMIT = 5
+def transfer_to_tr(qb, ih, name, save_path, cid=""):
+    """【交棒】tr 指向同一数据目录，校验后从 qb 删任务(数据保留)。
+       失败会记账(content.xfer_fail),面板看得见,下一轮自动重试 ——
+       老版失败只写一行日志就算了,而且因为 media 表已有记录,下一轮压根不会再试。"""
+    err = ""
     try:
         data = qb.export(ih)
         if data[:1] != b'd':
-            logmsg("WARN", f"转种失败(导出非种子) {name[:36]}"); return False
-        tr = tr_conn(); resp = tr.add(data, save_path); args = resp.get("arguments", {})
-        added = args.get("torrent-added") or args.get("torrent-duplicate")
-        if added:
-            if added.get("id"):
-                try: tr.call("torrent-verify", {"ids": [added["id"]]})
-                except Exception: pass
-            qb.delete(ih, delete_files=False)
-            logmsg("INFO", f"转种 qb→tr 完成(数据保留): {name[:40]}")
-            return True
-        logmsg("WARN", f"转种 tr 拒绝 {name[:36]}: {resp.get('result')}")
+            err = "qb 导出的不是种子文件"
+            logmsg("WARN", f"交棒失败(导出非种子) {name[:36]}")
+        else:
+            tr = tr_conn(); resp = tr.add(data, save_path); args = resp.get("arguments", {})
+            added = args.get("torrent-added") or args.get("torrent-duplicate")
+            if added:
+                if added.get("id"):
+                    try: tr.call("torrent-verify", {"ids": [added["id"]]})
+                    except Exception: pass
+                qb.delete(ih, delete_files=False)
+                logmsg("INFO", f"交棒 qb→tr 完成(数据保留): {name[:40]}")
+                if cid:
+                    led_bind(ih, cid, "tr", "", save_path); led_xfer_ok(cid)
+                return True
+            err = f"tr 拒绝: {resp.get('result')}"
+            logmsg("WARN", f"交棒被 tr 拒绝 {name[:36]}: {resp.get('result')}")
     except Exception as e:
-        logmsg("ERROR", f"转种异常 {name[:30]}: {e}")
+        err = str(e)[:70]
+        logmsg("ERROR", f"交棒异常 {name[:30]}: {e}")
+    if cid: led_xfer_fail(cid, err)
     return False
 
-def process_completed(qb, t):
-    """qb 一个种子下载完成后的全套处理"""
+def _qb_identify(qb, t, files=None):
+    """给一个 qb 种子定身份并登记。先查账,查不到才去拉文件列表(每分钟扫一遍,别浪费请求)。"""
+    ih = t["hash"]; name = t["name"]; sp = t.get("save_path", "")
+    cid = led_cid(ih)
+    if cid and files is None:
+        return cid, None
+    if files is None:
+        files = qb.files(ih)
+    man = manifest_qb(files, name)
+    cid = content_id(man)
+    led_touch(cid, name, t.get("size") or t.get("total_size") or 0, len(man))
+    led_bind(ih, cid, "qb", "", sp)
+    return cid, files
+
+def organize_step(qb, t, cid, files):
+    """【入库】识别 + 硬链接进媒体库 + 刮削。与交棒完全独立 —— 入库失败不该拖累做种。"""
     ih = t["hash"]; name = t["name"]; sp = t["save_path"]
-    if "keepseed" in (t.get("tags") or ""):
-        # 批量保种的种子:不刮削不入库,直接转 tr 做种;之后辅种扫描自然会带上它
-        if transfer_to_tr(qb, ih, name, sp):
-            base = name.rsplit(".", 1)[0] if "." in name[-6:] else name   # 站点标题没有扩展名(xx.zip→xx)
-            c = db(); c.execute("UPDATE keepseed SET status='done' WHERE status='pushed' AND name IN (?,?)", (name, base)); c.commit(); c.close()
-            logmsg("INFO", f"保种完成→tr: {name[:44]}")
-        return
-    try:
-        files = [(os.path.join(sp, f["name"]), f["name"]) for f in qb.files(ih)]
-    except Exception as e:
-        logmsg("ERROR", f"取qb文件列表失败 {name[:30]}: {e}"); return
+    paths = [(os.path.join(sp, f["name"]), f["name"]) for f in files]
     if t.get("category") == "音乐" or meta_is_music(name):
-        try: organize_music(ih, name, files)
+        try: organize_music(ih, name, paths)
         except Exception as e: logmsg("ERROR", f"音乐入库异常 {name[:30]}: {e}")
-        if transfer_to_tr(qb, ih, name, sp):
-            c = db(); row = c.execute("SELECT data FROM pending_seed WHERE name=?", (name,)).fetchone(); c.close()
-            if row:
-                try:
-                    threading.Thread(target=_preseed, args=(ih, name, json.loads(row[0])), daemon=True).start()
-                except Exception: pass
         return
-    m = tmdb_match(name)
+    # 下载后的文件名是最可靠的证据。像 E01…E32 这种整季资源，即使种子顶层
+    # 文件夹曾被错命名为某部电影，也必须只在 TMDB 的电视剧结果里匹配。
+    m = tmdb_match(name, force_tv=files_indicate_tv(paths))
     cat = media_category(name, m)
     if m and m["conf"] in ("high", "mid"):
         try:
-            do_organize(ih, name, files, m, cat)
+            do_organize(ih, name, paths, m, cat)
+            c = db(); c.execute("UPDATE media SET cid=? WHERE info_hash=?", (cid, ih)); c.commit(); c.close()
         except Exception as e:
             logmsg("ERROR", f"入库异常 {name[:30]}: {e}")
             c = db(); c.execute("UPDATE media SET status='error' WHERE info_hash=?", (ih,)); c.commit(); c.close()
     else:
         hold_media(ih, name, cat, "识别置信度不足" if m else "TMDB无匹配")
-    if transfer_to_tr(qb, ih, name, sp):
-        c = db(); row = c.execute("SELECT data FROM pending_seed WHERE name=?", (name,)).fetchone(); c.close()
-        if row:
-            try:
-                mates = json.loads(row[0])
-                threading.Thread(target=_preseed, args=(ih, name, mates), daemon=True).start()
-            except Exception: pass
+
+def handoff_step(qb, t, cid):
+    """【交棒】qb→tr。做完顺带触发预存辅种。返回是否成功。"""
+    ih = t["hash"]; name = t["name"]; sp = t["save_path"]
+    if not transfer_to_tr(qb, ih, name, sp, cid=cid):
+        return False
+    c = db(); row = c.execute("SELECT data FROM pending_seed WHERE name=?", (name,)).fetchone(); c.close()
+    if row:
+        try:
+            threading.Thread(target=_preseed, args=(ih, name, json.loads(row[0])), daemon=True).start()
+        except Exception: pass
+    return True
+
+_QB_SETTLED = set()      # 本进程内已确认「入库和交棒都无事可做」的 qb 种子,跳过以免每分钟空查
+def process_completed(qb, t):
+    """qb 一个种子下完之后的处理。老版把入库和交棒串成一条路,任何一步的记录存在就整个跳过 ——
+       结果是交棒失败以后**永远不会重试**(media 表已有记录),而且面板上看不出来。
+       现在两件事各自判断、各自记账、各自重试。"""
+    ih = t["hash"]; name = t["name"]
+    if ih in _QB_SETTLED: return
+    is_keep = "keepseed" in (t.get("tags") or "")
+    try:
+        cid, files = _qb_identify(qb, t)
+    except Exception as e:
+        logmsg("ERROR", f"取qb文件列表失败 {name[:30]}: {e}"); return
+    led_role(cid, "stock" if is_keep else "library")
+    # ① 入库:只有媒体库资产才做,保种库存不刮削不入库
+    need_org = False
+    if not is_keep and CFG["ORGANIZE"] and CFG["TMDB_KEY"]:
+        c = db(); row = c.execute("SELECT status FROM media WHERE info_hash=?", (ih,)).fetchone(); c.close()
+        need_org = not row                     # hold/error/done 都不重复自动入库
+    if need_org:
+        if files is None:
+            try: files = qb.files(ih)
+            except Exception as e:
+                logmsg("ERROR", f"取qb文件列表失败 {name[:30]}: {e}"); files = []
+        if files:
+            logmsg("INFO", f"qb 下载完成，整理入库: {name[:44]}")
+            organize_step(qb, t, cid, files)
+    # ② 交棒:所有种子都要做。失败留在账上,下一轮自己重试,不用人管
+    if not led_has_tr(cid):
+        g = led_get(cid) or {}
+        if (g.get("xfer_fail") or 0) >= XFER_FAIL_LIMIT:
+            _QB_SETTLED.add(ih)                # 连败到上限,等人处理,别每分钟重试
+            return
+        if handoff_step(qb, t, cid) and is_keep:
+            base = name.rsplit(".", 1)[0] if "." in name[-6:] else name
+            c = db()
+            c.execute("UPDATE keepseed SET status='done', cid=? WHERE status='pushed' AND name IN (?,?)",
+                      (cid, name, base))
+            c.commit(); c.close()
+            logmsg("INFO", f"保种完成→tr: {name[:44]}")
+    elif not need_org:
+        _QB_SETTLED.add(ih)                    # 入库和交棒都无事可做,这个种子不用再看了
 
 def manual_organize(ih, query):
     """待确认条目：用户给 TMDB id 或片名，重新匹配并入库。数据可能已转到 tr。"""
@@ -1727,6 +2290,7 @@ def manual_organize(ih, query):
         except Exception: pass
     if not files:
         return {"ok": False, "err": "qb/tr 里都找不到该种子的文件"}
+    force_tv = files_indicate_tv(files)
     m = None
     # 支持显式指定类型: movie/79064 或 tv/79064(TMDB 的 id 在剧/影里是两套独立编号!
     # 同一个 79064,tv 是《富贵男》、movie 才是《手机》,不能撞到哪个算哪个)
@@ -1737,7 +2301,8 @@ def manual_organize(ih, query):
         query = mp.group(2)
     if query.isdigit():
         cands = []
-        for mt in (["tv", "movie"] if not want else [want]):
+        # 多集文件与手动填的数字 ID 冲突时，信文件清单；不能再把 E01-E32 送到电影库。
+        for mt in (["tv"] if force_tv else (["tv", "movie"] if not want else [want])):
             try:
                 d = _tmdb_call(f"/{mt}/{query}", language="zh-CN")
                 if d.get("id"):
@@ -1750,7 +2315,7 @@ def manual_organize(ih, query):
             except Exception: continue
         if cands:
             low = re.sub(r'[^a-z0-9一-鿿]', '', (name or "").lower())
-            hint = "tv" if meta_is_tv(name or "") else "movie"
+            hint = "tv" if force_tv or meta_is_tv(name or "") else "movie"
             def score(x):
                 s = 0
                 for t in (x.get("tmdb_name"), x.get("orig")):
@@ -1761,7 +2326,9 @@ def manual_organize(ih, query):
                 return s
             m = max(cands, key=score)
     else:                 # 否则当片名搜
-        cand = _tmdb_search(query)
+        cand = _tmdb_search(query, tv_only=force_tv)
+        if force_tv and any(r.get("media_type") == "tv" for r in cand):
+            cand = [r for r in cand if r.get("media_type") == "tv"]
         if cand:
             r = cand[0]
             m = {"mtype": "tv" if r.get("media_type") == "tv" else "movie", "id": r.get("id"),
@@ -1817,7 +2384,9 @@ def _preseed(ih, name, mates):
             return
         cands = [{"downloadUrl": m.get("url",""), "size": m.get("size",0), "indexer": m.get("site","")} for m in mates]
         logmsg("INFO", f"⚡ 预存辅种开跑(下载时已知 {len(cands)} 个站): {name[:36]}")
-        run_match(tr, t, [], pre_results=cands)
+        # 预存候选只是第一轮快速比对；没有命中时仍须以「英文剧名+季号」
+        # 精确重搜。此前传空列表会跳过这一轮，导致 S04 等内容只能靠手动重搜。
+        run_match(tr, t, cross_seed_queries(name), pre_results=cands)
     except Exception as e:
         logmsg("ERROR", f"预存辅种异常 {name[:28]}: {e}")
     finally:
@@ -1835,12 +2404,8 @@ def qb_watcher():
             health_check("qb", True)
             for t in tl:
                 if t.get("progress", 0) < 1: continue
-                # 普通种子要整理入库(需开关+TMDB);保种种子只转tr,无条件处理
-                if "keepseed" not in (t.get("tags") or "") and not (CFG["ORGANIZE"] and CFG["TMDB_KEY"]): continue
-                ih = t["hash"]
-                c = db(); row = c.execute("SELECT status FROM media WHERE info_hash=?", (ih,)).fetchone(); c.close()
-                if row: continue          # done/hold/error 都不重复自动处理，hold 走手动确认
-                logmsg("INFO", f"qb 下载完成，整理+转种: {t['name'][:44]}")
+                # 老版在这里用 media 表有没有记录来决定跳不跳过,把入库和交棒绑死了:
+                # 入库过一次(哪怕是 hold),交棒失败也再没人管。现在交给 process_completed 分别判断。
                 process_completed(qb, t)
         except Exception as e:
             health_check("qb", False)
@@ -1868,119 +2433,221 @@ def prowlarr_download(url):
     req = urllib.request.Request(url, headers={"X-Api-Key":CFG["PROWLARR_KEY"]})
     return urllib.request.urlopen(req, timeout=25).read()
 
-# ============ 核心：按给定关键词辅种一个种子 ============
+# ============ §9 策略:四条线各自怎么干(是数据,不是代码) ============
+# 同一套零件(身份/账本/解析/打分/取数),四种组装方式。这些差异过去散在各函数体里 ——
+# 加一个场景就得在三处塞 if,改漏一处就出怪事。现在改一行策略就够。
+POLICY = {
+    # 找片:人在屏幕前等,少而精,有硬截止,丢慢站无所谓(慢站的种大站基本都有)
+    "find":      {"timeout": 9,  "deadline": 22,  "workers": 96, "intent": "browse", "delay": 0},
+    # 辅种:一个站都不能漏 —— 所以不设短截止、慢站也等;但压低并发,
+    #      别为了一份内容把 Prowlarr 打满(它是后台批量跑的,不是一次性动作)
+    "crossseed": {"timeout": 20, "deadline": 300, "workers": 8,  "intent": "",       "delay": 2},
+    # 批量收:无人值守,一部片只要一个好种,只问几个大站,覆盖面交给后台辅种
+    "harvest":   {"timeout": 9,  "deadline": 25,  "workers": 32, "intent": "collect","delay": 0},
+    # 保种:不走搜索,走站点列表页直连翻页(ks_browse),这里只放节流和配额
+    "stock":     {"timeout": 30, "deadline": 0,   "workers": 1,  "intent": "",       "delay": 2},
+}
+
+# ============ §10 作业·认领:把一个搜索结果认领成「同一份内容的另一个实例」 ============
+def _claim_one(tr, t, cid, local_set, r, top):
+    """比对单个搜索结果并注入。返回 (matched, injected, 结果串)。
+       认领的判据只有一个:文件清单完全相同。名字/大小都只是粗筛。"""
+    total = t["totalSize"]
+    if not r.get("downloadUrl") or abs(r.get("size", 0) - total) >= total * CFG["SIZE_TOLERANCE"]:
+        return 0, 0, ""
+    time.sleep(CFG["SNATCH_DELAY"])
+    try:
+        data = prowlarr_download(r["downloadUrl"])
+        if data[:1] != b'd': return 0, 0, ""
+        cname, cfiles = torrent_files(data)
+        if set(cfiles.items()) != local_set: return 0, 0, ""     # 清单对不上,不是同一份内容
+    except Exception:
+        return 0, 0, ""
+    ih = t["hashString"]; inj = 0; mode = "direct" if cname == top else "link"; res = "matched"
+    try: chash = torrent_infohash(data)
+    except Exception: chash = ""
+    # 同 info_hash(多站挂同一个种子文件):绝不能 tr.add —— tr4 会用新 tracker 顶掉旧的,
+    # 断了原站做种。正确做法是给现有种子追加该站 tracker,一个种子同时向多站汇报(IYUU式)。
+    if chash and chash.lower() == ih.lower():
+        try:
+            res = tr_add_trackers(tr, ih, torrent_announces(data))
+        except Exception as e:
+            logmsg("WARN", f"加tracker失败: {str(e)[:40]}"); res = "duplicate"
+        if res == "tracker": inj = 1
+        return 1, inj, res
+    if cname == top:
+        dl_dir = t["downloadDir"]
+    else:
+        link_top = os.path.join(CFG["DATA_LINK_DIR"], cname); data_top = os.path.join(t["downloadDir"], top)
+        for relp in cfiles:
+            src = os.path.join(data_top, relp); dst = os.path.join(link_top, relp)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if not os.path.exists(dst):
+                try: os.link(src, dst)
+                except OSError: pass
+        dl_dir = CFG["DATA_LINK_DIR"]
+    try:
+        resp = tr.add(data, dl_dir); rr = resp.get("result"); args = resp.get("arguments", {})
+        # tr 对"新增"和"内容已存在"都返回 result=success,靠 arguments 里的键区分
+        if "torrent-duplicate" in args:
+            res = "duplicate"; dup = args["torrent-duplicate"]
+            try:
+                if dup.get("id") is not None:
+                    if tr_add_trackers(tr, dup["id"], torrent_announces(data)) == "tracker":
+                        inj = 1; res = "tracker"
+            except Exception as e:
+                logmsg("WARN", f"加tracker失败: {str(e)[:40]}")
+        elif "torrent-added" in args or rr == "success": inj = 1; res = "injected"
+        else: res = "inject_fail:" + str(rr)
+    except Exception:
+        res = "inject_err"
+    return 1, inj, res
+
+def claim_batch(tr, t, cid, local_set, results, ban=None):
+    """认领一批结果。返回 (matched, injected)。逐条记 matches 表,边辅边更新计数。"""
+    ih = t["hashString"]; top = t["name"]
+    ban = ban if ban is not None else [b.strip().lower() for b in CFG["TR_BAN_SITES"].split(",") if b.strip()]
+    m = inj = 0
+    for r in results:
+        if any(b in (r.get("indexer") or "").lower() for b in ban):
+            continue                      # 该站 ban 了 tr 客户端,注了也是废种
+        try:
+            mm, ii, res = _claim_one(tr, t, cid, local_set, r, top)
+        except Exception:
+            continue
+        if not mm: continue
+        m += mm; inj += ii
+        if cid:                     # 认领成功 = 这个站确实有这份内容,记进覆盖账
+            try:
+                _um, _nm = site_urlmap()
+                led_cov_set(cid, match_site(r.get("indexer") or "", _nm, _um), "seeding")
+            except Exception: pass
+        c = db()
+        c.execute("INSERT INTO matches(info_hash,indexer,matched_name,mode,result,ts) VALUES(?,?,?,?,?,?)",
+                  (ih, r.get("indexer"), (r.get("title") or "")[:120], "auto", res, int(time.time())))
+        c.execute("UPDATE torrents SET status='injecting', matched=matched+1, injected=injected+? WHERE info_hash=?",
+                  (ii, ih))
+        c.commit(); c.close()
+    return m, inj
+
+# ============ §10 作业·辅种:目标是把这份内容的 coverage pending 消成空 ============
+def _register(t, sites=None):
+    """把一个 tr 种子登记进总账,返回 (cid, 文件清单, 来源站)。
+       来源站必须归一化到 Prowlarr 的索引器名 —— 否则 'ttg' 和 'TTG' 是两个站,
+       自己在做种的站会被年年重问一遍(实测踩到过,见 match_site 的注释)。"""
+    man = manifest_tr(t)
+    cid = content_id(man)
+    urlmap, names = site_urlmap()
+    sites = sites or names
+    source = ""
+    for tk in t.get("trackers", []):
+        try: host = urllib.parse.urlparse(tk.get("announce", "")).hostname or ""
+        except Exception: continue
+        if not host: continue
+        d = _reg_domain(host.lower())
+        source = urlmap.get(d) or match_site(tracker_site(tk.get("announce", "")), sites, urlmap)
+        if source: break
+    led_touch(cid, t["name"], t.get("totalSize", 0), len(man))
+    led_bind(t["hashString"], cid, "tr", source, t.get("downloadDir", ""))
+    if source: led_cov_set(cid, source, "source")      # 本来就是从这个站下的,不用再问
+    return cid, man, source
+
 def run_match(tr, t, queries, manual=False, pre_results=None):
-    ih = t["hashString"]; name = t["name"]; total = t["totalSize"]
-    top = name; rel = {}
-    for f in t.get("files", []):
-        fn = f["name"]
-        rel[fn[len(top)+1:] if fn.startswith(top+"/") else fn] = f["length"]
-    local_set = set(rel.items())
-    trackers = [tk.get("announce","") for tk in t.get("trackers", [])]
-    source = next((tracker_site(a) for a in trackers if tracker_site(a)), "") or "?"
+    """兼容入口:按给定关键词辅种一个种子(手动重搜 / 预存候选 走这里)。
+       全站覆盖的自动辅种走 crossseed_one,别用这个 —— 这里不记 coverage。"""
+    ih = t["hashString"]; name = t["name"]
+    cid, man, source = _register(t)
+    local_set = set(man.items())
     c = db()
     c.execute("INSERT OR IGNORE INTO torrents(info_hash,name,size,files,query,status,first_seen) VALUES(?,?,?,?,?,?,?)",
-              (ih, name, total, len(rel), " / ".join(queries), "searching", int(time.time())))
-    c.execute("UPDATE torrents SET query=?, status=?, matched=0, injected=0, source=?, last_searched=? WHERE info_hash=?", (" / ".join(queries), "searching", source, int(time.time()), ih))
+              (ih, name, t["totalSize"], len(man), " / ".join(queries), "searching", int(time.time())))
+    c.execute("UPDATE torrents SET query=?, status=?, matched=0, injected=0, source=?, last_searched=?, cid=? WHERE info_hash=?",
+              (" / ".join(queries), "searching", source or "?", int(time.time()), cid, ih))
     c.commit(); c.close()
 
-    def process(results):
-        m = inj = 0
-        ban = [b.strip().lower() for b in CFG["TR_BAN_SITES"].split(",") if b.strip()]
-        for r in results:
-            if not r.get("downloadUrl") or abs(r.get("size",0)-total) >= total*CFG["SIZE_TOLERANCE"]:
-                continue
-            if any(b in (r.get("indexer") or "").lower() for b in ban):
-                continue                      # 该站 ban 了 Transmission 客户端,注了也是废种
-            time.sleep(CFG["SNATCH_DELAY"])
-            try:
-                data = prowlarr_download(r["downloadUrl"])
-                if data[:1] != b'd': continue
-                cname, cfiles = torrent_files(data)
-                if set(cfiles.items()) != local_set: continue
-                m += 1; same = (cname == top); mode = "direct" if same else "link"; res = "matched"
-                # 同 info_hash(多站挂同一个种子文件)：绝不能 tr.add(tr4会用新tracker顶掉旧的断了原站做种)，
-                # 直接给现有种子追加该站 tracker —— 一个种子同时向多站汇报(IYUU式)
-                try: chash = torrent_infohash(data)
-                except Exception: chash = ""
-                if chash and chash.lower() == ih.lower():
-                    try:
-                        res = tr_add_trackers(tr, ih, torrent_announces(data))
-                    except Exception as e:
-                        logmsg("WARN", f"加tracker失败: {str(e)[:40]}"); res = "duplicate"
-                    if res == "tracker": inj += 1
-                    mode = "tracker"
-                    c = db()
-                    c.execute("INSERT INTO matches(info_hash,indexer,matched_name,mode,result,ts) VALUES(?,?,?,?,?,?)",
-                              (ih, r.get("indexer"), cname[:120], mode, res, int(time.time())))
-                    c.execute("UPDATE torrents SET status='injecting', matched=matched+1, injected=injected+? WHERE info_hash=?",
-                              (1 if res == "tracker" else 0, ih))
-                    c.commit(); c.close()
-                    continue
-                if same:
-                    dl_dir = t["downloadDir"]
-                else:
-                    link_top = os.path.join(CFG["DATA_LINK_DIR"], cname); data_top = os.path.join(t["downloadDir"], top)
-                    for relp in cfiles:
-                        src = os.path.join(data_top, relp); dst = os.path.join(link_top, relp)
-                        os.makedirs(os.path.dirname(dst), exist_ok=True)
-                        if not os.path.exists(dst):
-                            try: os.link(src, dst)
-                            except OSError: pass
-                    dl_dir = CFG["DATA_LINK_DIR"]
-                try:
-                    resp = tr.add(data, dl_dir); rr = resp.get("result"); args = resp.get("arguments", {})
-                    # 注意：tr 对"新增"和"内容已存在"都返回 result=success，靠 arguments 里的键区分
-                    if "torrent-duplicate" in args:
-                        # 同 info_hash(多站同一种子文件) → IYUU式: 给现有种子加新站tracker
-                        res = "duplicate"; dup = args["torrent-duplicate"]
-                        try:
-                            if dup.get("id") is not None:
-                                if tr_add_trackers(tr, dup["id"], torrent_announces(data)) == "tracker":
-                                    inj += 1; res = "tracker"
-                        except Exception as e:
-                            logmsg("WARN", f"加tracker失败: {str(e)[:40]}")
-                    elif "torrent-added" in args or rr == "success": inj += 1; res = "injected"
-                    else: res = "inject_fail:"+str(rr)
-                except Exception: res = "inject_err"
-                c = db()
-                c.execute("INSERT INTO matches(info_hash,indexer,matched_name,mode,result,ts) VALUES(?,?,?,?,?,?)",
-                        (ih, r.get("indexer"), cname[:120], mode, res, int(time.time())))
-                # 边辅边更新计数，仪表盘搜索途中就能看到实时进度(状态标"辅种中")
-                c.execute("UPDATE torrents SET status='injecting', matched=matched+1, injected=injected+? WHERE info_hash=?",
-                          (1 if res == "injected" else 0, ih))
-                c.commit(); c.close()
-            except Exception:
-                continue
-        return m, inj
-
     matched = injected = 0; had_result = False; used = ""
-    if pre_results is not None:            # 下载时预存的同组候选，直接比对注入，不再搜索
-        m, inj = process(pre_results)
+    if pre_results is not None:            # 下载时预存的同组候选,先直接比对注入
+        m, inj = claim_batch(tr, t, cid, local_set, pre_results)
         matched, injected, had_result, used = m, inj, True, "下载时预存"
-        queries = []
+        if matched: queries = []           # 已命中,无须再搜索造成重复请求
     for q in queries:
         try:
             results = prowlarr_search(q); had_result = True
         except Exception as e:
             logmsg("WARN", f"搜索[{q}]失败 {name[:30]}: {e}"); continue
-        m, inj = process(results)
+        m, inj = claim_batch(tr, t, cid, local_set, results)
         matched += m; injected += inj; used = q
-        if matched > 0: break   # 这个关键词辅到了，不必再试下一个(如英文兜底)
+        # 这里 break 是对的:手动重搜/预存候选求的是「快点辅上」,不是全站覆盖。
+        # 全站覆盖走 crossseed_one,那边每个站独立记账,绝不会因为辅到一个就收工。
+        if matched > 0: break
     if not had_result:
         set_status(ih, "search_error"); logmsg("ERROR", f"搜索全失败 {name[:40]}"); return
     c = db(); c.execute("UPDATE torrents SET status=?, matched=?, injected=? WHERE info_hash=?",
-              ("done" if matched else "no_match", matched, injected, ih)); c.commit(); c.close()
+                        ("done" if matched else "no_match", matched, injected, ih)); c.commit(); c.close()
     logmsg("INFO", f"{'手动' if manual else ''}辅种 {name[:40]} | 命中[{used}] 匹配{matched} 注入{injected}")
     if injected > 0:
         notify(f"🌱 辅种 +{injected} 站", name[:56])
 
-def cross_seed_one(tr, t):
-    # 自动关键词：中文主搜 + 英文兜底
+def crossseed_one(tr, t, log=lambda m: None):
+    """全站覆盖辅种。与老版的三处关键区别:
+       ① 只问账上还欠的站(coverage pending),不是每次全站重来
+       ② **不再辅到一个站就 break** —— 每个站独立记账,认领与否互不影响
+       ③ 逐站落账:seeding / absent(确实没有) / error(没问成),后两者绝不混为一谈"""
     name = t["name"]
-    query = extract_query(name); query_en = extract_english(name)
-    queries = [query] + ([query_en] if query_en and query_en.lower() != query.lower() else [])
-    run_match(tr, t, queries)
+    ban = [b.strip().lower() for b in CFG["TR_BAN_SITES"].split(",") if b.strip()]
+    try:
+        idx = prowlarr_indexers()
+    except Exception as e:
+        logmsg("WARN", f"辅种取站点列表失败: {str(e)[:40]}"); return 0, 0
+    cid, man, source = _register(t, [i.get("name", "") for i in idx])
+    local_set = set(man.items())
+    # ban 的站直接落账,永远不问 —— 注了也是废种,不该年年占着 pending 位
+    for i in idx:
+        if any(b in (i.get("name") or "").lower() for b in ban):
+            led_cov_set(cid, i["name"], "banned", "该站ban了tr客户端")
+    todo = led_cov_pending(cid, [i["name"] for i in idx])
+    if not todo:
+        log(f"✅ {name[:32]} 各站都问过了,跳过"); return 0, 0
+    todo_ids = [i["id"] for i in idx if i.get("name") in set(todo)]
+    pol = POLICY["crossseed"]
+    st = {}
+    queries = cross_seed_queries(name)
+    if not queries:
+        logmsg("WARN", f"辅种取不出关键词,跳过: {name[:36]}"); return 0, 0
+    results = prowlarr_search_fan(queries, log, per_timeout=pol["timeout"], deadline=pol["deadline"],
+                                  only_ids=todo_ids, status=st, workers=pol["workers"])
+    ih = t["hashString"]
+    c = db()
+    c.execute("INSERT OR IGNORE INTO torrents(info_hash,name,size,files,query,status,first_seen) VALUES(?,?,?,?,?,?,?)",
+              (ih, name, t["totalSize"], len(man), " / ".join(queries), "searching", int(time.time())))
+    c.execute("UPDATE torrents SET query=?, status='searching', matched=0, injected=0, source=?, last_searched=?, cid=? WHERE info_hash=?",
+              (" / ".join(queries), source or "?", int(time.time()), cid, ih))
+    c.commit(); c.close()
+    # 按站分组认领 —— 这是能逐站记账的前提
+    bysite = {}
+    for r in results:
+        bysite.setdefault(r.get("indexer") or "?", []).append(r)
+    matched = injected = 0; nseed = nabsent = nerr = 0
+    for site in todo:
+        if st.get(site) != "ok":
+            led_cov_set(cid, site, "error", (st.get(site) or "没回")[:40]); nerr += 1
+            continue
+        m, inj = claim_batch(tr, t, cid, local_set, bysite.get(site, []), ban=ban)
+        matched += m; injected += inj
+        if m:
+            led_cov_set(cid, site, "seeding"); nseed += 1
+        else:
+            led_cov_set(cid, site, "absent"); nabsent += 1     # 问过了,这个站确实没有
+    c = db(); c.execute("UPDATE torrents SET status=?, matched=?, injected=? WHERE info_hash=?",
+                        ("done" if matched else "no_match", matched, injected, ih)); c.commit(); c.close()
+    logmsg("INFO", f"辅种 {name[:36]} | 问{len(todo)}站 → 认领{nseed} 确认没有{nabsent} 没问成{nerr} | 注入{injected}")
+    if injected > 0:
+        notify(f"🌱 辅种 +{injected} 站", name[:56])
+    return matched, injected
+
+def cross_seed_one(tr, t):
+    """老名字保留(别处还在调),行为已换成覆盖驱动。"""
+    return crossseed_one(tr, t)
 
 def manual_research(info_hash, custom_query):
     # 手动兜底：用户指定关键词重搜一个种子
@@ -1997,39 +2664,109 @@ def manual_research(info_hash, custom_query):
 def set_status(ih, st):
     c = db(); c.execute("UPDATE torrents SET status=? WHERE info_hash=?", (st, ih)); c.commit(); c.close()
 
-# ============ 扫描循环 ============
+# ============ §11 调度·总账回填 ============
+_BACKFILL = {"running": False, "msg": "", "done": 0, "total": 0}
+def backfill_ledger():
+    """一次性回填:把 tr 里现有的种子全部登记进总账。**只算身份,不发一个搜索请求。**
+
+       为什么需要:升级到覆盖驱动辅种之后,老库里几千个种子在新账上是一片空白。
+       不回填的话,辅种调度得靠一轮 15 个慢慢啃,要一周才把账认全,期间面板上
+       缺种报告基本是空的,人会以为功能坏了。
+
+       分批拉:tr 的 torrent-get 不支持分页,一次要 4000 个种子的完整文件清单
+       就是几十 MB 的 JSON。先用轻字段拿全部 hash,再每批 200 个拉明细。"""
+    if _BACKFILL["running"]: return
+    _BACKFILL.update(running=True, msg="开始回填…", done=0, total=0)
+    try:
+        tr = tr_conn()
+        lite = tr.torrents(fields=["hashString", "downloadDir", "totalSize"])
+        keep = (CFG["KEEP_DIR"] or "").rstrip("/")
+        hs = [t["hashString"] for t in lite
+              if t.get("totalSize", 0) > 0 and "cross-seed-links" not in t.get("downloadDir", "")]
+        _BACKFILL["total"] = len(hs)
+        urlmap, names = site_urlmap()
+        n = 0
+        for i in range(0, len(hs), 200):
+            batch = hs[i:i+200]
+            try:
+                r = tr.call("torrent-get", {"ids": batch, "fields": TR.TFULL})
+                for t in r.get("arguments", {}).get("torrents", []):
+                    try:
+                        cid, man, src = _register(t, names)
+                        if _under(t.get("downloadDir", ""), keep):
+                            led_role(cid, "stock")      # 保种库存:登记但不参与辅种覆盖
+                        led_place(cid, "tr")
+                        n += 1
+                    except Exception:
+                        continue
+            except Exception as e:
+                logmsg("WARN", f"回填第 {i//200+1} 批失败: {str(e)[:40]}")
+            _BACKFILL.update(done=n, msg=f"回填中 {n}/{len(hs)}")
+            time.sleep(0.3)
+        _BACKFILL["msg"] = f"✅ 回填完成:{n} 份内容已入账"
+        logmsg("INFO", f"总账回填完成: {n} 份内容")
+    except Exception as e:
+        _BACKFILL["msg"] = f"⚠️ 回填失败: {str(e)[:50]}"
+        logmsg("ERROR", f"总账回填失败: {e}")
+    finally:
+        _BACKFILL["running"] = False
+
+# ============ §11 调度·辅种轮次 ============
 def scanner():
+    """辅种调度。与老版三处不同:
+       ① 轻量拉列表(不带 files),只对选中要辅的那几个再拉文件清单 —— 老版每轮把
+          4000+ 个种子的完整文件列表全拉一遍,几十 MB JSON,大部分是白拉的。
+       ② 优先级按「账上还欠几个站」排,不是先来后到;从没登记过的新内容优先。
+       ③ 有预算。老版靠 6 小时冷却拍脑袋跳过整个种子,既拦不住重复问、又漏掉真正欠站的。"""
     time.sleep(5)
     tr = tr_conn()
     while True:
         try:
-            torrents = tr.torrents()
+            lite = tr.torrents(fields=TR.TLITE)
             health_check("tr", True)
-            now = int(time.time())
-            c = db()
-            # 按“内容”(名字+大小)去重：辅种产生的副本和原种是同一内容，只处理一次，不重复辅种
-            done_content = {(r[0], r[1]) for r in c.execute("SELECT name,size FROM torrents WHERE status IN ('done','no_match')").fetchall()}
-            cooldown_content = {(r[0], r[1]) for r in c.execute("SELECT name,size FROM torrents WHERE last_searched > ?", (now-21600,)).fetchall()}
-            c.close()
-            todo = []; seen_content = set(done_content) | set(cooldown_content)
-            for t in torrents:
-                key = (t.get("name",""), t.get("totalSize",0))
-                if key in seen_content: continue                        # 该内容已处理/冷却中/本轮已排入
-                dd = t.get("downloadDir","")
-                if t.get("totalSize",0) <= 0 or "cross-seed-links" in dd: continue
-                if CFG["KEEP_DIR"] and dd.startswith(CFG["KEEP_DIR"].rstrip("/")): continue   # 保种专用目录:只做种,不辅种
-                seen_content.add(key); todo.append(t)
-            logmsg("INFO", f"扫描: tr共{len(torrents)}个副本, 去重后待辅种{len(todo)}个内容")
-            for t in todo:
-                try: cross_seed_one(tr, t)
-                except Exception as e: logmsg("ERROR", f"辅种异常 {t.get('name','')[:30]}: {e}")
-                time.sleep(8)  # 种子间隔，别打爆 Prowlarr
+            try:
+                sites = [i.get("name", "") for i in prowlarr_indexers()]
+            except Exception as e:
+                logmsg("WARN", f"辅种轮次取站点失败,本轮跳过: {str(e)[:40]}")
+                time.sleep(CFG["SCAN_INTERVAL"]); continue
+            cand = []; seen = set(); keep = (CFG["KEEP_DIR"] or "").rstrip("/")
+            for t in lite:
+                dd = t.get("downloadDir", "")
+                if t.get("totalSize", 0) <= 0 or "cross-seed-links" in dd: continue
+                if _under(dd, keep): continue                      # 保种目录:只做种,不辅种
+                key = (t.get("name", ""), t.get("totalSize", 0))   # 同内容的多个副本只处理一次
+                if key in seen: continue
+                seen.add(key)
+                cid = led_cid(t.get("hashString", ""))
+                if not cid:
+                    cand.append((10 ** 6, t))                      # 从没登记过 = 新内容,最优先
+                else:
+                    n = len(led_cov_pending(cid, sites))
+                    if n: cand.append((n, t))                      # 欠得越多越优先
+            cand.sort(key=lambda x: -x[0])
+            budget = max(1, CFG["CROSSSEED_BUDGET"])
+            todo = cand[:budget]
+            logmsg("INFO", f"辅种轮次: tr {len(lite)} 个副本 → {len(seen)} 份内容,"
+                           f"账上欠站的 {len(cand)} 份,本轮预算 {len(todo)} 份")
+            for _, lt in todo:
+                try:
+                    full = tr.torrent(lt["hashString"])            # 到这一步才拉文件清单
+                    if not full: continue
+                    crossseed_one(tr, full)
+                except Exception as e:
+                    logmsg("ERROR", f"辅种异常 {lt.get('name','')[:30]}: {e}")
+                time.sleep(8)   # 种子间隔，别打爆 Prowlarr
         except Exception as e:
             health_check("tr", False)
-            logmsg("ERROR", f"扫描异常: {e}")
+            logmsg("ERROR", f"辅种轮次异常: {e}")
         time.sleep(CFG["SCAN_INTERVAL"])
 
 # ============ 网页仪表盘 ============
+# ⚠️ PAGE 是三引号普通字符串,Python 会先解释一遍反斜杠转义 ——
+#    模板里的 JS 禁止写反斜杠转义(例如给引号转义):求值后反斜杠会消失,变成裸引号
+#    → JS 语法错误 → 整页白屏,而 ast.parse 对此毫无感觉。踩过两次。
+#    要在 JS 字符串里嵌引号,一律走 data 属性:data-x="值" + this.dataset.x。
+#    改完必须把求值后的 PAGE 里的 <script> 提出来过 node --check。
 PAGE = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>观澜 Wavegazer</title><link rel="icon" href="/favicon.ico" type="image/svg+xml"><style>
 :root{--ikb:#002FA7;--acc:#ffffff;--accL:#CFE0FF;--pop:#FFD400;--ok:#3ddc84;--warn:#ffd83d;--err:#ff8579;--fg:#fff;--sub:rgba(255,255,255,.78);--line:rgba(255,255,255,.24);--card:rgba(255,255,255,.17);--card2:rgba(255,255,255,.26)}
@@ -2055,13 +2792,13 @@ table{width:100%;border-collapse:collapse}
 th{color:var(--sub);font-weight:500;font-size:12px;text-align:left;padding:8px 20px;border-top:none}
 td{text-align:left;padding:11px 20px;border-top:1px solid var(--line);font-size:13px}
 tr:hover td{background:rgba(255,255,255,.05)}
-.b{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600}
+.b{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600;white-space:nowrap}
 .done{background:rgba(61,220,132,.22);color:#8dffbd}.nomatch{background:rgba(255,216,61,.2);color:#ffe680}
 .searching{background:rgba(255,255,255,.22);color:#fff}.err{background:rgba(255,133,121,.25);color:#ffc4bd}
 .name{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .name a{color:#fff;text-decoration:none}.name a:hover{color:var(--accL);text-decoration:underline}
 a{color:var(--accL);text-decoration:none}
-.src{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;background:rgba(255,255,255,.16);color:#fff;font-weight:500}
+.src{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;background:rgba(255,255,255,.16);color:#fff;font-weight:500;white-space:nowrap}
 .mut{color:var(--sub)}.r{text-align:right}
 .rs{display:flex;gap:6px}
 .rs input{background:rgba(255,255,255,.14);border:none;color:#fff;border-radius:9px;padding:6px 10px;font-size:12px;width:130px;outline:none}
@@ -2279,6 +3016,10 @@ select.ksin option{color:#00206e}
 .chip.on{background:rgba(80,220,140,.25);color:#b8ffd6}
 .chip.off{background:rgba(255,255,255,.09);color:var(--sub)}
 .chip.ban{background:rgba(255,80,80,.28);color:#ffc9c9;font-weight:700}
+.chip.wait{background:rgba(255,212,0,.22);color:#ffeb99}
+.chip.err{background:rgba(255,133,121,.24);color:#ffc9c9}
+.covbar{display:inline-block;width:64px;height:6px;border-radius:980px;background:rgba(255,255,255,.16);vertical-align:middle;overflow:hidden}
+.covbar>i{display:block;height:100%;background:var(--ok)}
 #xf-ov{position:fixed;inset:0;background:rgba(0,18,70,.55);backdrop-filter:blur(8px);z-index:60;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:.25s}
 #xf-ov.show{opacity:1;pointer-events:auto}
 #xf-box{width:min(680px,92vw);max-height:86vh;overflow-y:auto;background:rgba(255,255,255,.16);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,.3);border-radius:22px;padding:24px;box-shadow:0 30px 80px rgba(0,10,60,.6)}
@@ -2337,7 +3078,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 <a href="#dl" class="tabbtn" data-t="dl">⬇️ 下载管理</a>
 <a href="#media" class="tabbtn" data-t="media">📥 整理入库</a>
 <a href="#seed" class="tabbtn" data-t="seed">🌱 辅种</a>
-<a href="#keep" class="tabbtn" data-t="keep">🌊 保种转种</a>
+<a href="#keep" class="tabbtn" data-t="keep">🌊 做种运营</a>
 <a href="#health" class="tabbtn" data-t="health">🩺 做种健康</a>
 <a href="#logs" class="tabbtn" data-t="logs">📋 日志</a>
 <a href="#setup" class="tabbtn" data-t="setup">⚙️ 设置</a>
@@ -2407,7 +3148,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 <div id=health style="padding:2px 20px 16px"><span class=mut>进入自动体检…</span></div></div>
 </div>
 <div id=tab-keep class=tab>
-<div class=card><h2>🌊 批量保种 <span class=mut style=font-weight:400>· 选站拉列表 → 筛选勾选 → 批量推 qb,下载完自动转 tr 做种 · 隔离在保种专用目录:不辅种/不入库/不打扰正常流水线,到期删目录即清仓 · 磁盘低于保护线自动暂停</span></h2>
+<div class=card><h2>🌊 批量保种 <span class=mut style=font-weight:400>· 选站拉列表 → 筛选勾选 → 批量推 qb,下载完自动转 tr 做种 · 隔离在保种专用目录:不辅种/不入库/不打扰正常流水线 · 磁盘低于保护线自动暂停 · 清退看下面「③ 库存台账」</span></h2>
 <div style="padding:4px 20px 8px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
 <span style="font-weight:800">① 选站和条件</span>
 <select id=ks-ix class=ksin style="min-width:160px"><option value="">加载站点中…</option></select>
@@ -2446,7 +3187,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 </div>
 <div class=card><h2>📦 保种任务 <span class=mut style=font-weight:400>· 队列逐个下载推 qb · <button class="dlbtn btn-ghost" style="padding:4px 12px;font-size:12px" onclick="ksStop()">⏹ 停止清空</button> <button class=dlbtn style="padding:4px 12px;font-size:12px" onclick="ksRetry(this)">♻️ 重试失败</button> <button class="dlbtn btn-ghost" style="padding:4px 12px;font-size:12px" onclick="ksClear(this)">🗑 清历史记录</button></span></h2>
 <div id=ks-stat style="padding:0 20px 16px"><span class=mut>暂无任务</span></div></div>
-<div class=card><h2>🧭 缺种报告 <span class=mut style=font-weight:400>· 缺种列基于「观澜辅到了哪些站」反推,会把没辅到但站上其实有的误报为缺 · 发种前点「🔍 核实」对这部剧真去全站搜一遍,拿准确名单 · 带禁转标记的资料包直接拦</span> <button class=dlbtn style="padding:5px 16px;font-size:12px" onclick="gapLoad(this)">刷新</button></h2>
+<div class=card><h2>🧭 缺种报告 <span class=mut style=font-weight:400>· 三档分开:<b>已在站</b>=正在做种 / <b>确认没有</b>=问过了这站真没有 / <b>还没问</b>=账上还欠着,不算缺 · 点「⚡ 补问」立刻把欠的站问一遍,不用等辅种轮次 · 只有「确认没有」才值得发种,资料包带禁转标记直接拦</span> <button class=dlbtn style="padding:5px 16px;font-size:12px" onclick="gapLoad(this)">刷新</button></h2>
 <div id=gap style="padding:0 20px 16px"><span class=mut>点「刷新」生成(要请求 Prowlarr,几秒钟)</span></div></div>
 <div id=xf-ov onclick="this.classList.remove('show')"><div id=xf-box onclick="event.stopPropagation()">
 <div style="font-size:17px;font-weight:800;margin-bottom:4px">🚚 发种资料包 <span class=mut id=xf-meta style=font-weight:400></span></div>
@@ -2470,6 +3211,10 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 <button class=dlbtn onclick="xfCopy('xf-mi',this)">复制MediaInfo</button>
 <button class=dlbtn onclick="xfCopy('xf-sh',this)">复制截图</button>
 </div></div></div>
+
+<div class=card><h2>③ 库存台账 <span class=mut style=font-weight:400>· 灌进来的东西也得有出口 · 按证据硬度分三档,硬证据才建议清 · 删数据不可逆,只动保种目录</span>
+<button class=dlbtn style="float:right;padding:5px 14px;font-size:12px" onclick="stockLoad(this)">盘点</button></h2>
+<div id=stock style="padding:4px 20px 16px"><span class=mut>点「盘点」查看保种库存现在还值不值得占盘</span></div></div>
 </div>
 <div id=tab-logs class=tab>
 <div class=card><h2>最近活动</h2><table><tr><th style=width:150px>时间</th><th>消息</th></tr>{{LOGS}}</table></div>
@@ -2758,23 +3503,88 @@ function fwToggle(btn){
  if(!ix){toast('先在①里选要守候的站点');return;}
  fetch('/api/ks/watch?ix='+ix).then(r=>r.json()).then(function(d){toast(d.ok?'⚡ 守候已开启,新免费种自动抢':'失败');ksStatus();});
 }
+var _stockPick={dead:[],offline:[],idle_big:[]};
+function stockSec(key,title,rows,gb,hint,cls){
+ if(!rows.length)return '';
+ var h='<div style="margin:14px 0 6px"><b>'+title+'</b> <span class=mut>'+rows.length+' 个 · 共 '+gb+' GB · '+hint+'</span>'
+  +' <button class=dlbtn style="padding:3px 10px;font-size:11px;margin-left:6px" data-sk="'+key+'" onclick="stockAll(this.dataset.sk)">全选本档</button></div><table>';
+ rows.forEach(function(r,i){
+  h+='<tr><td style="width:26px"><input type=checkbox data-k="'+key+'" data-h="'+r.hash+'"></td>'
+   +'<td class=name title="'+r.name.replace(/"/g,'')+'">'+r.name.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</td>'
+   +'<td class=r>'+r.sizeh+'</td><td class=mut style="font-size:12px">'+r.why+'</td></tr>';
+ });
+ return h+'</table>';
+}
+function stockAll(k){document.querySelectorAll('#stock input[data-k="'+k+'"]').forEach(function(c){c.checked=true;});}
+function stockLoad(btn){
+ if(btn){btn.disabled=true;btn.textContent='盘点中…';}
+ fetch('/api/stock').then(r=>r.json()).then(function(d){
+  if(btn){btn.disabled=false;btn.textContent='盘点';}
+  var el=document.getElementById('stock');
+  if(!d.ok){el.innerHTML='<span class=mut>'+(d.err||'盘点失败')+'</span>';return;}
+  var h='<div class=mut style="margin-bottom:6px">库存 '+d.n+' 个 · 占盘 '+d.total+' · 累计上传 '+d.up_total
+   +' · 磁盘剩余 '+d.free_gb+'GB(保护线 '+d.guard_gb+'GB)</div>';
+  h+=stockSec('dead','🔴 站点已删种',d.dead,d.dead_gb,'tracker 自己说这个种没了,继续做纯浪费,清了不影响考核','');
+  h+=stockSec('offline','🟠 tracker 连不上',d.offline,d.offline_gb,'也可能是站点抽风或 cookie 过期,清之前值得看一眼','');
+  h+=stockSec('idle_big','⚪ 大体积零上传',d.idle_big,d.idle_gb,'只是陈列 —— 保种本来就是备着,没上传不等于没价值,自己判断','');
+  if(!d.dead.length&&!d.offline.length&&!d.idle_big.length)
+   h+='<div style="margin-top:10px">✅ 库存都健康('+d.alive_n+' 个正常做种),没有该清的</div>';
+  else h+='<div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+   +'<button class=dlbtn style="background:rgba(255,120,100,.34)" onclick="stockEvict()">🗑 清退勾选的(连数据一起删)</button>'
+   +'<span class=mut style="font-size:12px">不可逆。只会动保种目录里的种子,媒体库资产会被后端拒绝。</span></div>';
+  el.innerHTML=h;
+ }).catch(function(){if(btn){btn.disabled=false;btn.textContent='盘点';}});
+}
+function stockEvict(){
+ var hs=[];document.querySelectorAll('#stock input[type=checkbox]:checked').forEach(function(c){hs.push(c.dataset.h);});
+ if(!hs.length){toast('先勾选要清的');return;}
+ if(!confirm('确定清退 '+hs.length+' 个保种种子?数据会一起删除,不可恢复。'))return;
+ fetch('/api/stock/evict',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hashes:hs})})
+  .then(r=>r.json()).then(function(d){
+   if(!d.ok){toast('清退失败: '+(d.err||''));return;}
+   toast('已清退 '+d.removed.length+' 个,腾出 '+d.freed+(d.refused.length?' · '+d.refused.length+' 个被护栏拒绝':''));
+   stockLoad();
+  }).catch(function(){toast('清退出错');});
+}
 function gapLoad(btn){
  if(btn){btn.disabled=true;btn.textContent='生成中…';}
  fetch('/api/gap').then(r=>r.json()).then(function(d){
   if(btn){btn.disabled=false;btn.textContent='刷新';}
   var el=document.getElementById('gap');
-  if(!d.ok||!d.rows.length){el.innerHTML='<span class=mut>暂无数据(先让辅种扫描跑起来)</span>';return;}
-  var h='<table><tr><th>内容</th><th class=r>体积</th><th>已在站('+'共'+d.sites+'站)</th><th>缺种站</th><th></th></tr>';
+  if(!d.ok||!d.rows.length){el.innerHTML='<span class=mut>暂无数据(先让辅种跑起来)</span>';return;}
+  var st=d.stat||{};
+  var h='<div class=mut style="margin:0 0 10px">账上共 '+(st.content||0)+' 份内容 · 已做种 '+(st.seeding||0)+' 站次 · 问过确实没有 '+(st.absent||0)+' 站次'+(st.error?' · <span style="color:var(--err)">没问成 '+st.error+' 站次</span>':'')+'</div>';
+  h+='<table><tr><th>内容</th><th class=r>体积</th><th>问遍了没</th><th>已在站</th><th>账上状况</th><th></th></tr>';
   d.rows.forEach(function(r){
    var nm=r.name.replace(/&/g,'&amp;').replace(/</g,'&lt;');
-   var on=r.seeded.map(s=>'<span class="chip on">'+s+'</span>').join('');
-   var off=r.missing.slice(0,12).map(s=>'<span class="chip off">'+s+'</span>').join('')+(r.missing.length>12?'<span class=mut> +'+(r.missing.length-12)+'</span>':'');
-   h+='<tr data-sites="'+d.sites+'"><td class=name title="'+nm+'">'+nm+'</td><td class=r>'+r.sizeh+'</td><td class=gseed>'+on+'</td><td class=gmiss>'+(r.missing.length?off:'<span class=mut>全覆盖 🎉</span>')+'</td>'
-    +'<td style="white-space:nowrap"><button class=dlbtn style="padding:5px 12px;font-size:12px;background:rgba(255,255,255,.2);color:#fff" data-h="'+r.hash+'" onclick="gapV(this.dataset.h,this)">🔍 核实</button> '
-    +(r.missing.length?'<button class=dlbtn style="padding:5px 12px;font-size:12px" data-h="'+r.hash+'" onclick="xfer(this.dataset.h)">🚚 资料包</button>':'')+'</td></tr>';
+   var tot=d.sites||1, asked=r.seeded.length+r.absent.length+r.banned.length;
+   var pct=Math.min(100,Math.round(asked*100/tot));
+   var owe=r.pending.length+r.errs.length;
+   var on=r.seeded.map(x=>'<span class="chip on">'+x+'</span>').join('')||'<span class=mut>—</span>';
+   var bits=[];
+   if(r.pending.length)bits.push('<span class="chip wait" title="'+r.pending.join(" ")+'">还没问 '+r.pending.length+' 站</span>');
+   if(r.errs.length)bits.push('<span class="chip err" title="'+r.errs.join(" ")+'">没问成 '+r.errs.length+' 站</span>');
+   if(r.absent.length)bits.push('<span class="chip off" title="'+r.absent.join(" ")+'">确认没有 '+r.absent.length+' 站</span>');
+   h+='<tr data-sites="'+tot+'"><td class=name title="'+nm+'">'+nm+'</td><td class=r>'+r.sizeh+'</td>'
+    +'<td><span class=covbar><i style="width:'+pct+'%"></i></span> <span class=mut>'+asked+'/'+tot+'</span></td>'
+    +'<td class=gseed>'+on+'</td>'
+    +'<td class=gmiss>'+(bits.length?bits.join(''):'<span class=mut>全问遍了 🎉</span>')+'</td>'
+    +'<td style="white-space:nowrap">'
+    +(owe?'<button class=dlbtn style="padding:5px 12px;font-size:12px;background:rgba(255,212,0,.28);color:#fff" data-h="'+r.hash+'" onclick="gapFill(this.dataset.h,this)">⚡ 补问 '+owe+' 站</button> ':'')
+    +(r.absent.length?'<button class=dlbtn style="padding:5px 12px;font-size:12px" data-h="'+r.hash+'" onclick="xfer(this.dataset.h)">🚚 发种资料包</button>':'')
+    +'</td></tr>';
   });
   el.innerHTML=h+'</table>';
  }).catch(function(){if(btn){btn.disabled=false;btn.textContent='刷新';}});
+}
+function gapFill(h,btn){
+ btn.disabled=true;var o=btn.textContent;btn.textContent='补问中…';
+ fetch('/api/gapfill?hash='+h).then(r=>r.json()).then(function(d){
+  btn.disabled=false;
+  if(!d.ok){btn.textContent=o;toast('补问失败: '+(d.err||''));return;}
+  toast('补问完成:认领 '+d.matched+' 站,注入 '+d.injected+' 站;账上还欠 '+(d.pending.length+d.errs.length)+' 站');
+  gapLoad();
+ }).catch(function(){btn.disabled=false;btn.textContent=o;toast('补问出错');});
 }
 function gapV(h,btn){
  btn.disabled=true;btn.dataset.o=btn.textContent;btn.textContent='核实中…约30秒';
@@ -3002,12 +3812,24 @@ function mkRow(x,rs){
  var c1=document.createElement('td');c1.className='sname';c1.title=x.title+'（点击打开站点种子详情页）';
  if(x.info){var a=document.createElement('a');a.href=x.info;a.target='_blank';a.rel='noreferrer';a.textContent=x.title;a.style.color='var(--fg)';c1.appendChild(a);}
  else{c1.textContent=x.title;}
+ if(x.alts&&x.alts.length){var mb=document.createElement('span');mb.className='mut';
+  mb.style.cssText='font-size:11px;margin-left:8px;white-space:nowrap';
+  mb.textContent='+'+x.alts.length+' 站';mb.title='另有 '+x.alts.length+' 个站有同一个发布，已合并';c1.appendChild(mb);}
+ if(x.zhkind){var zb=document.createElement('span');
+  zb.style.cssText='font-size:11px;margin-left:8px;padding:1px 7px;border-radius:9px;background:rgba(64,190,120,.18);color:#3fbf6f;white-space:nowrap';
+  zb.textContent=x.zhkind;
+  zb.title=(x.zhrank>1?'种子名里明写了中文音轨（不是字幕）':'多条音轨，很可能含国语但种子名没写明，下载前建议确认');
+  if(x.zhrank>2)zb.style.cssText+=';font-weight:600';
+  if(x.zhrank<2)zb.style.cssText+=';background:rgba(200,160,60,.18);color:#c9a13f';
+  c1.appendChild(zb);}
+ var cq=document.createElement('td');cq.className='mut';cq.style.cssText='font-size:12px;white-space:nowrap';
+ cq.textContent=((x.res?x.res+'p':'')+' '+(x.src||'')).trim()||'—';
  var cg=document.createElement('td');cg.className='mut';cg.style.fontSize='12px';cg.textContent=x.grp||'—';
  var c2=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=x.site;c2.appendChild(sp);
  var c3=document.createElement('td');c3.className='r';c3.textContent=x.sizeh;
  var c4=document.createElement('td');c4.className='r';c4.textContent=x.seeders;
  var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x,rs);};c5.appendChild(b);
- tr.appendChild(c1);tr.appendChild(cg);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tr.appendChild(c5);
+ tr.appendChild(c1);tr.appendChild(cq);tr.appendChild(cg);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tr.appendChild(c5);
  return tr;
 }
 /* 一部多季的剧,种子是几十条乱序堆在一起的。按季分段、每季内把「推荐制作组」顶到最前,
@@ -3037,22 +3859,28 @@ function mkTable(rs){
    if(cov[g]>bn||(cov[g]==bn&&(tot[g]||0)>(tot[best]||0))){bn=cov[g];best=g;}
   });
  }
- var only=false;
+ var only=false,zhonly=false;
+ var nzh=rs.filter(function(x){return x.zhaud;}).length;
+ function zcmp(a,b){return (b.zhrank||0)-(a.zhrank||0);}
  function build(){
   var tbl=document.createElement('table');
   var hd=document.createElement('tr');
-  hd.innerHTML='<th>标题</th><th>制作组</th><th>站点</th><th class=r>大小</th><th class=r>做种</th><th></th>';
+  hd.innerHTML='<th>标题</th><th>画质</th><th>制作组</th><th>站点</th><th class=r>大小</th><th class=r>做种</th><th></th>';
   tbl.appendChild(hd);
-  if(!grouped){rs.forEach(function(x){tbl.appendChild(mkRow(x,rs));});return tbl;}
+  if(!grouped){
+   rs.filter(function(x){return !zhonly||x.zhaud;})
+     .slice().sort(function(a,b){return zcmp(a,b)||b.seeders-a.seeders;})
+     .forEach(function(x){tbl.appendChild(mkRow(x,rs));});
+   return tbl;}
   function sec(label,items){
-   var list=items.filter(function(x){return !only||x.grp==best;});
+   var list=items.filter(function(x){return (!only||x.grp==best)&&(!zhonly||x.zhaud);});
    if(!list.length)return;
    var tr=document.createElement('tr'),td=document.createElement('td');
-   td.colSpan=6;td.style.cssText='padding:9px 16px 3px;font-weight:600;font-size:13px;opacity:.8';
+   td.colSpan=7;td.style.cssText='padding:9px 16px 3px;font-weight:600;font-size:13px;opacity:.8';
    td.textContent=label+'（'+list.length+'）';tr.appendChild(td);tbl.appendChild(tr);
    list.slice().sort(function(a,b){
     var pa=(best&&a.grp==best)?0:1,pb=(best&&b.grp==best)?0:1;
-    return pa-pb||b.seeders-a.seeders;
+    return zcmp(a,b)||pa-pb||b.seeders-a.seeders;
    }).forEach(function(x){tbl.appendChild(mkRow(x,rs));});
   }
   sec('📦 合集 / 跨季包',packs);
@@ -3073,6 +3901,20 @@ function mkTable(rs){
   };
   tip.appendChild(ts);tip.appendChild(tb);wrap.appendChild(tip);
  }
+ var zt=document.createElement('div');zt.className='mut';
+ zt.style.cssText='padding:4px 16px 8px;font-size:12px';
+ if(nzh){
+  var zs=document.createElement('span');
+  zs.textContent='🔊 有 '+nzh+' 个带中文音轨，已排在前面　';
+  var zbn=document.createElement('button');zbn.className='dlbtn';
+  zbn.style.cssText='padding:2px 9px;font-size:12px';zbn.textContent='只看中文音轨';
+  zbn.onclick=function(){zhonly=!zhonly;zbn.textContent=(zhonly?'看全部':'只看中文音轨');
+   wrap.replaceChild(build(),wrap.lastChild);};
+  zt.appendChild(zs);zt.appendChild(zbn);
+ }else{
+  zt.textContent='🔇 这批结果里没有一个标了中文音轨 —— 多半是这部片子本来就没有国配，不是没搜到';
+ }
+ wrap.appendChild(zt);
  wrap.appendChild(build());
  return wrap;
 }
@@ -3939,13 +4781,12 @@ def search_group(q, results, log=lambda m: None, anchor=None):
     for r in results:
         url = r.get("downloadUrl") or r.get("guid") or ""
         if not url: continue
-        _t = r.get("title", "")
-        _pk = _is_pack(_t)
-        out.append({"title": _t, "site": r.get("indexer",""),
-                    "sizeh": human_size(r.get("size",0)), "size": r.get("size",0), "seeders": r.get("seeders") or 0,
-                    "url": url, "cat": catlab(r), "info": r.get("infoUrl") or "",
-                    "ss": 0 if _pk else (_season_of(_t) or 0), "grp": _relgrp(_t), "pack": _pk})
-    out.sort(key=lambda x: x["seeders"], reverse=True)
+        out.append(parse_release({
+            "title": r.get("title",""), "site": r.get("indexer",""),
+            "sizeh": human_size(r.get("size",0)), "size": r.get("size",0),
+            "seeders": r.get("seeders") or 0,
+            "url": url, "cat": catlab(r), "info": r.get("infoUrl") or ""}))
+    out.sort(key=lambda x: -score_release(x, "browse"))
     out = out[:100]
     # 音乐走 iTunes 识别(TMDB不管音乐)，其余走 TMDB
     for x in out:
@@ -4043,8 +4884,8 @@ def search_group(q, results, log=lambda m: None, anchor=None):
             other.append(x)
     def seed_filter(rs):
         good = [x for x in rs if x["seeders"] >= CFG["MIN_SEEDERS"]]
-        if good: return good
-        return rs[:max(1, round(len(rs) * 0.2))]
+        if not good: good = rs[:max(1, round(len(rs) * 0.2))]
+        return dedupe_releases(good)
     allg = list(groups.values()) + list(mgroups.values())
     for g in allg:
         g["results"] = seed_filter(g["results"])
@@ -4239,19 +5080,6 @@ def itunes_discography(artist):
         logmsg("WARN", f"iTunes 年表取不到[{artist}]: {str(e)[:40]}")
         return []
 
-def _score_music(title, seeders, size):
-    """经典度/可收藏度打分。做种数是 PT 圈公认度的最好代理 —— 越经典的专辑留存的人越多。
-       但光看做种会把精选集和单曲排到前面,所以要按「是不是正规专辑 + 是不是分轨」修正。"""
-    t = title or ""
-    sc = float(seeders or 0)
-    if _SPLIT_RE.search(t): sc += 500          # 分轨:Navidrome 能识别每首歌,这是硬需求
-    elif _WHOLE_RE.search(t): sc -= 400        # 整轨:一张专辑一个大文件,体验差
-    if re.search(r'\bFLAC\b', t, re.I): sc += 120   # FLAC 比 WAV/DSD 省一大截空间,音质无差
-    if _NONSTUDIO.search(t): sc -= 250         # 精选/Live 往后排,正传优先
-    if _SINGLE_RE.search(t) or size < 120 * 1024**2: sc -= 600   # 单曲/碎片不值得收藏
-    if size > 3 * 1024**3: sc -= 300           # 超大包(全收录那种)不好管理,也没法单张辅种
-    return sc
-
 _CJKC = re.compile(r'[一-鿿]')
 # iTunes 会把版本信息缀在专辑名里(「虚度 - Single」「葉惠美 (Remastered)」),
 # 而种子名里没有这些词 —— 不剥掉,严格包含就永远对不上,只能靠模糊蒙,一蒙就错配。
@@ -4284,9 +5112,10 @@ def artist_albums(artist, log=lambda m: None):
     for r in res:
         t = (r.get("title") or "").strip()
         if not t or not _LOSS_RE.search(t): continue     # 只收无损
-        pool.append({"title": t, "site": r.get("indexer",""), "size": r.get("size") or 0,
-                     "sizeh": human_size(r.get("size") or 0), "seeders": r.get("seeders") or 0,
-                     "url": r.get("downloadUrl") or r.get("guid") or ""})
+        pool.append(parse_release({
+            "title": t, "site": r.get("indexer",""), "size": r.get("size") or 0,
+            "sizeh": human_size(r.get("size") or 0), "seeders": r.get("seeders") or 0,
+            "url": r.get("downloadUrl") or r.get("guid") or ""}))
     def norm(x): return re.sub(r'[^0-9a-z一-鿿]+', '', (x or "").lower())
     def hit(key, title):
         """专辑名对不对得上。严格包含是主路;模糊匹配**只对中文开放**。
@@ -4323,7 +5152,7 @@ def artist_albums(artist, log=lambda m: None):
         cands = [p for p in pool if p["url"] not in used and hit(key, p["title"])
                  and bool(_LIVEW.search(p["title"])) == lv]
         if not cands: continue
-        for c in cands: c["_s"] = _score_music(c["title"], c["seeders"], c["size"])
+        for c in cands: c["_s"] = score_release(c, "music")
         cands.sort(key=lambda c: -c["_s"])
         best = cands[0]
         used.add(best["url"])
@@ -4332,8 +5161,8 @@ def artist_albums(artist, log=lambda m: None):
                      "rel": best["title"], "site": best["site"], "sizeh": best["sizeh"],
                      "size": best["size"], "seeders": best["seeders"], "url": best["url"],
                      "score": round(best["_s"]), "alts": len(cands),
-                     "studio": not bool(_NONSTUDIO.search(best["title"])),
-                     "split": bool(_SPLIT_RE.search(best["title"]))})
+                     "studio": not best["nonstudio"],
+                     "split": best["split"] is True})
     rows.sort(key=lambda r: r["date"] or "9999")
     # 推荐:正传 + 分轨 + 分数排前列。经典度靠做种数,但正传和分轨是硬门槛
     ranked = sorted([r for r in rows if r["studio"] and r["split"]], key=lambda r: -r["score"])
@@ -4350,6 +5179,7 @@ def artist_albums(artist, log=lambda m: None):
 #   ③ 已有的能跳过,不重复占空间;出问题单片重下即可。
 # 搜索只问几个大站(少而精,一部片只需要一个好种),覆盖面交给后台辅种全站铺开。
 
+CFG.setdefault("PREFER_ZH_AUDIO", os.environ.get("PREFER_ZH_AUDIO", "1") not in ("0", "", "false"))
 CFG.setdefault("BATCH_SITES", os.environ.get("BATCH_SITES", "Keep Friends,M-Team,HDSky,OurBits,HDHome"))
 CFG.setdefault("BATCH_MIN_GB", float(os.environ.get("BATCH_MIN_GB", "2")))
 CFG.setdefault("BATCH_MAX_GB", float(os.environ.get("BATCH_MAX_GB", "25")))
@@ -4373,19 +5203,9 @@ def _pick_release(results, prefer_4k=False):
        ③ 同做种数下优先 x265/HEVC(同画质体积小)。
        返回 None 表示这批候选都不合适,宁可不下也不下垃圾。"""
     lo, hi = CFG["BATCH_MIN_GB"] * 1024**3, CFG["BATCH_MAX_GB"] * 1024**3
-    cand = []
-    for r in results:
-        sz = r.get("size") or 0
-        if not (lo <= sz <= hi): continue
-        t = r["title"].lower()
-        score = (r.get("seeders") or 0)
-        if "x265" in t or "hevc" in t: score += 30
-        if prefer_4k and ("2160p" in t or "4k" in t): score += 200
-        elif not prefer_4k and "1080p" in t: score += 50
-        cand.append((score, r))
+    cand = [parse_release(r) for r in results if lo <= (r.get("size") or 0) <= hi]
     if not cand: return None
-    cand.sort(key=lambda x: -x[0])
-    return cand[0][1]
+    return max(cand, key=lambda r: score_release(r, "collect", prefer_4k))
 
 def _bjob_run(jid, col, total, prefer_4k):
     job = _BJOBS[jid]
@@ -4606,7 +5426,8 @@ def _ix_match(ix, cats):
 FILTER_CATS = {"movie": [2000], "tv": [5000], "anime": [5070], "book": [7000], "music": [3000]}
 FILTER_CN   = {"movie": "电影", "tv": "电视剧", "anime": "动漫", "book": "漫画/书", "music": "音乐"}
 
-def prowlarr_search_fan(queries, log=lambda m: None, per_timeout=None, deadline=None, cats=None, only=None):
+def prowlarr_search_fan(queries, log=lambda m: None, per_timeout=None, deadline=None, cats=None,
+                        only=None, only_ids=None, status=None, workers=0):
     """⚠️ 交互搜索专用。辅种走 prowlarr_search(聚合接口),那边要的是「一个站都不能少」,
        本函数会主动丢慢站,用在辅种上会悄悄削掉覆盖面 —— 种子还在,只是活不长,极难察觉。
 
@@ -4614,7 +5435,17 @@ def prowlarr_search_fan(queries, log=lambda m: None, per_timeout=None, deadline=
        ① 线程池以前只有 32 个位子,66 个站要排两三波,一波 25 秒 → 光扇出就能耗掉 40 秒。
           现在一次性铺开,所有站同时发车,总耗时 = 最慢的那个站,而不是波数 × 波长。
        ② 再加一道全局截止:到点就带着已经拿到的结果收网,掉队的站不等 —— 搜索时间从此有上限。
-       queries 可以是多个检索词(片名 + TMDB 别名),一起扔进同一个池,只花一波的时间。"""
+       queries 可以是多个检索词(片名 + TMDB 别名),一起扔进同一个池,只花一波的时间。
+
+       ⚠️ 上面那句「辅种别用本函数」已经作废(2026-08-19)。辅种现在**也**走这里,但走的是
+       另一套 Policy:only_ids 精确点名要问的站、deadline 放到很大、status 出参逐站记成败。
+       区别不在函数,在策略 —— 这正是重构的要点:取数只有一个入口,四条线用 Policy 分开。
+
+       status: 传一个 dict 进来,函数按站名填 "ok"(问到了,不管有没有货) / "error"(超时或异常)。
+               辅种靠它区分「这个站确实没有」和「这个站没问成」—— 老代码把两者混为一谈,
+               所以缺种报告只能靠反推,注释里自己都写了「搜不到≠一定没有」。
+       only_ids: 精确指定索引器 id 列表(不是模糊匹配站名)。辅种只问 coverage 里还欠的站。
+       workers: 并发上限,0=按站数铺开。辅种压低它,别为了一份内容把 Prowlarr 打满。"""
     if isinstance(queries, str): queries = [queries]
     queries = list(dict.fromkeys([q.strip() for q in queries if q and q.strip()]))
     if not queries: return []
@@ -4626,6 +5457,14 @@ def prowlarr_search_fan(queries, log=lambda m: None, per_timeout=None, deadline=
     except Exception as e:
         log(f"⚠️ 取站点列表失败({str(e)[:30]})，退回聚合搜索"); return prowlarr_search(queries[0], cats)
     from concurrent.futures import ThreadPoolExecutor, wait
+    if only_ids:
+        want = {int(x) for x in only_ids}
+        keep = [i for i in idx if int(i.get("id", 0)) in want]
+        if keep:
+            idx = keep
+            log(f"🎯 只问账上还欠的 {len(keep)} 个站")
+        else:
+            log("✅ 这份内容各站都问过了,本轮无需再问"); return []
     if only:
         # 批量下载专用:一部片只需要一个好种,没必要问 66 个站。
         # 覆盖面交给后台辅种(那边走 prowlarr_search 全站),这里只求快、且不给站点添压力。
@@ -4677,6 +5516,7 @@ def prowlarr_search_fan(queries, log=lambda m: None, per_timeout=None, deadline=
                 nm = ix.get("name", "?")
                 yield_[nm] = yield_.get(nm, 0)
                 left.discard(nm)
+                if status is not None: status[nm] = "error"     # 没问成 ≠ 这站没有
                 log(f"  ✗ {nm} 超时/失败，跳过 · 进度 {done[0]}/{total}")
             return
         with lock:
@@ -4688,6 +5528,7 @@ def prowlarr_search_fan(queries, log=lambda m: None, per_timeout=None, deadline=
                 results.append(it); n += 1
             yield_[ix.get("name","?")] = yield_.get(ix.get("name","?"), 0) + len(r or [])
             left.discard(ix.get("name","?"))
+            if status is not None: status[ix.get("name","?")] = "ok"   # 问成了(有没有货是另一回事)
             if n:
                 ok[0] += 1
                 log(f"  ✓ {ix.get('name','?')} 返回 {n} 条 · 进度 {done[0]}/{total}")
@@ -4698,7 +5539,7 @@ def prowlarr_search_fan(queries, log=lambda m: None, per_timeout=None, deadline=
     # 多等的 4 秒换来的 5% 还基本是快站上已有的重复种。
     # 门槛按「产出权重」算而不是按站点个数:M-Team 这种大站回来一个顶小站好几个,
     # 只回 9 条的小站没资格拖着大部队。权重来自各站历史平均产出(ix_weights),自己学。
-    ex = ThreadPoolExecutor(max_workers=min(total, 96))
+    ex = ThreadPoolExecutor(max_workers=min(total, workers or 96))
     need = wtot * CFG["SEARCH_QUORUM"] / 100.0
     cutoff = None
     try:
@@ -4751,16 +5592,21 @@ def _sjob_run(jid, q, filt=""):
                 + (f" · 年份限定 {year}" if year else "") + f" · 收到 {len(anchor['alias'])} 个别名")
         else:
             log(f"ℹ️ TMDB 没钉住「{name}」,按原词全站搜")
-        log(f"🚀 分站并发搜索(单站 {CFG['SEARCH_TIMEOUT']} 秒超时,全局 {CFG['SEARCH_DEADLINE']} 秒收网)…")
+        pol = POLICY["find"]
+        log(f"🚀 分站并发搜索(单站 {pol['timeout']} 秒超时,全局 {pol['deadline']} 秒收网)…")
         t0 = time.time()
-        results = prowlarr_search_fan([name], log, cats=cats)
-        # 别名兜底:只在主查询确实没捞着的时候才补一波(同站串行,会实打实多花几秒)
-        if anchor and CFG["SEARCH_ALIAS"] and anchor.get("altq"):
+        results = prowlarr_search_fan([name], log, per_timeout=pol["timeout"],
+                                      deadline=pol["deadline"], cats=cats, workers=pol["workers"])
+        # 别名兜底:只在主查询确实没捞着的时候才补(同站串行,会实打实多花几秒)。
+        # altqs 已经按命名体系去过重,补的是**不同的召回入口**,不是同一个词的三种拼写。
+        alts = (anchor or {}).get("altqs") or []
+        if anchor and CFG["SEARCH_ALIAS"] and alts:
             hit = sum(1 for r in results if _alias_hit(r.get("title", ""), anchor["alias"]))
             if hit < CFG["SEARCH_ALIAS_MIN"]:
-                log(f"🔁 主查询只认出 {hit} 条,用别名「{anchor['altq']}」再补一波")
+                log(f"🔁 主查询只认出 {hit} 条,用别名「{'」「'.join(alts)}」再补一波")
                 seen = {r.get("guid") or r.get("downloadUrl") or "" for r in results}
-                for r in prowlarr_search_fan([anchor["altq"]], log, cats=cats):
+                for r in prowlarr_search_fan(alts, log, per_timeout=pol["timeout"],
+                                             deadline=pol["deadline"], cats=cats, workers=pol["workers"]):
                     k = r.get("guid") or r.get("downloadUrl") or ""
                     if k and k in seen: continue
                     if k: seen.add(k)
@@ -4982,27 +5828,34 @@ def free_watcher():
         time.sleep(max(180, CFG["FREE_WATCH_MIN"] * 60))   # 最短3分钟,别把站刷毛了
 
 def gap_report():
-    """缺种矩阵:每个内容在哪些站做种、哪些站搜不到(注意:搜不到≠一定没有,可能是站点抽风)"""
-    try: all_sites = [i.get("name", "?") for i in prowlarr_indexers()]
-    except Exception: all_sites = []
-    ban = [b.strip().lower() for b in CFG["TR_BAN_SITES"].split(",") if b.strip()]
+    """缺种矩阵:直接读 coverage —— 这是**记下来的事实**,不是反推的猜测。
+
+       老版从 matches 表倒推「哪些站没出现过」,把两件完全不同的事混成一个「缺」:
+         · 问过了,这个站确实没有   → 真缺,可以去发种
+         · 压根没问过               → 不知道,不是缺
+       混在一起的后果是缺种列表虚高,文案只能写「搜不到≠一定没有」,还得另加一个
+       「🔍 逐站核实」按钮去补救。现在这两件事在账上就是分开的,不需要补救。"""
+    urlmap, all_sites = site_urlmap()
     rows = []
-    c = db()
-    for r in c.execute("""SELECT name,size,info_hash,source FROM torrents WHERE status IN ('done','no_match')
-                          GROUP BY name,size ORDER BY last_searched DESC LIMIT 120""").fetchall():
-        name, size, ih, src = r
-        seeded = {x[0] for x in c.execute(
-            "SELECT DISTINCT indexer FROM matches WHERE info_hash=? AND result IN ('injected','duplicate','tracker')", (ih,)).fetchall() if x[0]}
-        if src: seeded.add(src)
-        low = {s.lower() for s in seeded}
-        missing = [s for s in all_sites if s.lower() not in low
-                   and not any(s.lower() in l or l in s.lower() for l in low)
-                   and not any(b in s.lower() for b in ban)]
-        rows.append({"name": name, "hash": ih, "sizeh": human_size(size),
-                     "seeded": sorted(seeded), "missing": missing})
-    c.close()
-    rows.sort(key=lambda x: len(x["missing"]))
-    return {"ok": True, "sites": len(all_sites), "rows": rows}
+    for rec in led_recent(120, skip_role="stock"):
+        cid, name, size = rec["cid"], rec["name"], rec["size"]
+        cov = led_cov_get(cid)
+        seeded  = sorted(s_ for s_, v in cov.items() if v[0] in ("seeding", "source"))
+        absent  = sorted(s_ for s_, v in cov.items() if v[0] == "absent")
+        errs    = sorted(s_ for s_, v in cov.items() if v[0] == "error")
+        banned  = sorted(s_ for s_, v in cov.items() if v[0] == "banned")
+        pending = sorted(led_cov_pending(cid, all_sites))
+        ih = led_any_hash(cid)
+        rows.append({"name": name, "hash": ih, "cid": cid, "sizeh": human_size(size or 0),
+                     "seeded": seeded, "absent": absent, "errs": errs,
+                     "pending": [p for p in pending if p not in errs],
+                     "banned": banned,
+                     # missing 保留给老前端:语义收窄成「问过了确实没有」,不再掺没问过的
+                     "missing": absent})
+    # 排序:账上还欠得最多的排最前 —— 那才是「还没辅全」,而不是「辅不到」
+    rows.sort(key=lambda x: (-(len(x["pending"]) + len(x["errs"])), -len(x["absent"])))
+    return {"ok": True, "sites": len(all_sites), "rows": rows,
+            "stat": led_cov_stats()}
 
 _BATCH = {"research": False, "msg": ""}
 def research_all_worker():
@@ -5260,7 +6113,7 @@ def health_report(force=False):
             offline.append({"name": name, "sizeh": human_size(size), "trackers": bad})
         # 0-peer 冷种:做种状态,tracker报告只有自己(或没有)在做种、且无人下载。保种目录的冷种是本意,不算异常
         idle = int((now - t.get("activityDate", now)) / 86400) if t.get("activityDate") else 0
-        if t.get("status") == 6 and 0 <= best_seed <= 1 and best_leech == 0 and not (keep and dd.startswith(keep)):
+        if t.get("status") == 6 and 0 <= best_seed <= 1 and best_leech == 0 and not _under(dd, keep):
             dead.append({"name": name, "sizeh": human_size(size), "idle": idle,
                          "up": human_size(t.get("uploadedEver", 0) or 0)})
     dead.sort(key=lambda x: -x["idle"])
@@ -5269,9 +6122,135 @@ def health_report(force=False):
     _HEALTH_CACHE.update(ts=time.time(), d=d)
     return d
 
+# ============ §10 作业·保种库存:灌进来的东西,也得有出口 ============
+# 老版只有「灌」没有「清」:ks_autofill 一路灌到磁盘保护线就停 —— 停了之后呢?没有下文。
+# 更糟的是 health_report **故意排除了保种目录**(注释:「保种目录的冷种是本意」),
+# 于是全站最该被审视的那批种子恰恰没人看。盘满了只能人工去 tr 里一个个翻。
+_UNREG = re.compile(r'unregistered|not registered|torrent not found|未注册|not exist', re.I)
+_STOCK_CACHE = {"ts": 0, "d": None}
+
+def stock_report(force=False):
+    """保种库存台账:每份库存现在还值不值得占着盘。淘汰依据按**证据硬度**排序,
+       硬证据才建议清,软证据只陈列给人看 —— 判不出就别替人做主(这是踩过的规矩)。"""
+    if not force and _STOCK_CACHE["d"] and time.time() - _STOCK_CACHE["ts"] < 300:
+        return _STOCK_CACHE["d"]
+    keep = (CFG["KEEP_DIR"] or "").rstrip("/")
+    if not keep:
+        return {"ok": False, "err": "没有配置保种目录 KEEP_DIR"}
+    fields = ["hashString", "name", "totalSize", "downloadDir", "trackerStats",
+              "uploadedEver", "addedDate", "activityDate", "status", "error", "errorString"]
+    try:
+        ts = tr_conn().call("torrent-get", {"fields": fields}).get("arguments", {}).get("torrents", [])
+    except Exception as e:
+        return {"ok": False, "err": str(e)[:60]}
+    now = time.time()
+    dead, offline, idle_big, alive = [], [], [], []
+    total = up_total = 0
+    for t in ts:
+        dd = t.get("downloadDir", "")
+        if not _under(dd, keep): continue             # 只看保种库存
+        size = t.get("totalSize", 0) or 0; total += size
+        up = t.get("uploadedEver", 0) or 0; up_total += up
+        age = int((now - (t.get("addedDate") or now)) / 86400)
+        row = {"hash": t.get("hashString", ""), "name": t.get("name", ""), "size": size,
+               "sizeh": human_size(size), "up": human_size(up), "upraw": up, "age": age}
+        gone = [tk.get("host", "?") for tk in t.get("trackerStats", [])
+                if _UNREG.search(tk.get("lastAnnounceResult") or "")]
+        bad = [tk.get("host", "?") for tk in t.get("trackerStats", [])
+               if tk.get("lastAnnounceTime", 0) > 0 and not tk.get("lastAnnounceSucceeded")
+               and not _UNREG.search(tk.get("lastAnnounceResult") or "")]
+        if gone:
+            row["why"] = "站点已删种(tracker 报未注册):" + "、".join(gone[:3])
+            dead.append(row)
+        elif bad:
+            row["why"] = "tracker 连不上:" + "、".join(bad[:3])
+            offline.append(row)
+        elif up == 0 and age >= 30 and size >= 20 * 2**30:
+            row["why"] = f"做了 {age} 天一点没上传,占 {row['sizeh']}"
+            idle_big.append(row)
+        else:
+            alive.append(row)
+    for L in (dead, offline, idle_big): L.sort(key=lambda x: -x["size"])
+    free_gb = 0
+    try: free_gb = round(shutil.disk_usage("/data").free / 2**30)
+    except Exception: pass
+    d = {"ok": True, "n": len(dead) + len(offline) + len(idle_big) + len(alive),
+         "total": human_size(total), "up_total": human_size(up_total),
+         "free_gb": free_gb, "guard_gb": CFG["KEEP_MIN_FREE_GB"],
+         # 硬证据:站点自己说这个种没了,继续做是纯浪费,清了不影响任何考核
+         "dead": dead[:100], "dead_gb": round(sum(x["size"] for x in dead) / 2**30, 1),
+         # 中等证据:可能是站点抽风/cookie 过期,清之前值得看一眼
+         "offline": offline[:100], "offline_gb": round(sum(x["size"] for x in offline) / 2**30, 1),
+         # 软证据:只陈列,不建议自动清 —— 保种本来就是「备着」,没上传不等于没价值
+         "idle_big": idle_big[:100], "idle_gb": round(sum(x["size"] for x in idle_big) / 2**30, 1),
+         "alive_n": len(alive)}
+    _STOCK_CACHE.update(ts=time.time(), d=d)
+    return d
+
+def stock_evict(hashes, delete_data=True):
+    """清退保种库存。**不可逆**,所以护栏写死在这里,不给绕过的口子:
+         ① 只清数据目录在 KEEP_DIR 之下的 —— 媒体库资产一律拒绝
+         ② 逐个复核 tr 里的真实 downloadDir,不信前端传来的任何东西
+         ③ 媒体库那侧的硬链接不归这里管(保种库存本来就没有媒体库副本)
+       返回实际清掉的清单,让调用方能核对。"""
+    keep = (CFG["KEEP_DIR"] or "").rstrip("/")
+    if not keep: return {"ok": False, "err": "没有配置保种目录,拒绝执行"}
+    hs = [h for h in (hashes or []) if h]
+    if not hs: return {"ok": False, "err": "没有指定要清的种子"}
+    try:
+        tr = tr_conn()
+        ts = tr.call("torrent-get", {"fields": ["hashString", "name", "totalSize", "downloadDir"]}) \
+               .get("arguments", {}).get("torrents", [])
+    except Exception as e:
+        return {"ok": False, "err": str(e)[:60]}
+    byh = {t["hashString"].lower(): t for t in ts}
+    ok, refused, freed = [], [], 0
+    for h in hs:
+        t = byh.get(h.lower())
+        if not t:
+            refused.append({"hash": h[:12], "why": "tr 里找不到"}); continue
+        dd = t.get("downloadDir", "")
+        if not _under(dd, keep):                       # 硬护栏:不在保种目录,一律不碰
+            refused.append({"hash": h[:12], "name": t.get("name", "")[:40],
+                            "why": f"数据不在保种目录({dd[:40]}),拒绝删除"}); continue
+        try:
+            tr.call("torrent-remove", {"ids": [t["hashString"]],
+                                       "delete-local-data": bool(delete_data)})
+            ok.append({"name": t.get("name", "")[:60], "sizeh": human_size(t.get("totalSize", 0))})
+            freed += t.get("totalSize", 0) or 0
+            cid = led_cid(t["hashString"])
+            if cid: led_place(cid, "gone")
+        except Exception as e:
+            refused.append({"hash": h[:12], "name": t.get("name", "")[:40], "why": str(e)[:40]})
+    _STOCK_CACHE["d"] = None
+    if ok:
+        logmsg("INFO", f"保种清退 {len(ok)} 个,腾出 {human_size(freed)}"
+                       + ("(含数据)" if delete_data else "(仅删任务,数据保留)"))
+    return {"ok": True, "removed": ok, "refused": refused, "freed": human_size(freed)}
+
+def gap_fill(ih):
+    """立刻把这份内容账上欠的站问一遍(不等辅种轮次)。严格口径:文件清单必须完全一致。"""
+    try:
+        tr = tr_conn()
+        t = tr.torrent(ih)
+        if not t: return {"ok": False, "err": "tr 里找不到该种子"}
+        m, inj = crossseed_one(tr, t)
+        cid = content_id(manifest_tr(t))
+        cov = led_cov_get(cid)
+        urlmap, all_sites = site_urlmap()
+        return {"ok": True, "matched": m, "injected": inj,
+                "seeded": sorted(k for k, v in cov.items() if v[0] in ("seeding", "source")),
+                "absent": sorted(k for k, v in cov.items() if v[0] == "absent"),
+                "errs":   sorted(k for k, v in cov.items() if v[0] == "error"),
+                "pending": sorted(led_cov_pending(cid, all_sites))}
+    except Exception as e:
+        return {"ok": False, "err": str(e)[:80]}
+
 def gap_verify(ih):
-    """逐站核实:对该内容真的去全站搜一遍,准确报出哪些站有、哪些站真缺。
-    (缺种报告默认基于辅种记录反推,会把'我们没辅到但站上其实有'的站误报为缺,发种前用这个核实。)"""
+    """⚠️ 这是**发种查重**,不是辅种核实 —— 两件事,口径故意不同,别合并:
+         · 辅种(crossseed_one):文件清单必须一模一样,差一个字节就不是同一份数据
+         · 发种查重(本函数):这个站上**有没有这部片**(任何版本都算),免得重复占坑
+       所以本函数用宽松口径:标题搜得到就算「有」。发种前用它,辅种别用它。"""
     c = db(); t = c.execute("SELECT name,size FROM torrents WHERE info_hash=?", (ih,)).fetchone(); c.close()
     if not t: return {"ok": False, "err": "找不到该种子"}
     name, size = t
@@ -5571,6 +6550,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(s):
         if s.path.startswith("/api/wecom"):
             s._wecom_post(); return
+        if s.path.startswith("/api/stock/evict"):
+            if not s._auth_ok(): return
+            try:
+                ln = int(s.headers.get("Content-Length", "0"))
+                body = json.loads(s.rfile.read(ln).decode("utf-8", "ignore") or "{}")
+            except Exception:
+                body = {}
+            s._send_json(stock_evict(body.get("hashes") or [], bool(body.get("delete_data", True)))); return
         if s.path.startswith("/login"):
             s._login_post(); return
         if not s._auth_ok():
@@ -5683,6 +6670,15 @@ class Handler(BaseHTTPRequestHandler):
             h = (parse_qs(urlparse(s.path).query).get("hash", [""])[0]).strip()
             c = db(); n = c.execute("UPDATE media SET status='skip' WHERE info_hash=? AND status='hold'", (h,)).rowcount; c.commit(); c.close()
             s._send_json({"ok": bool(n)}); return
+        if s.path.startswith("/api/backfill"):
+            if not _BACKFILL["running"]:
+                threading.Thread(target=backfill_ledger, daemon=True).start()
+            s._send_json({"ok": True, **_BACKFILL}); return
+        if s.path.startswith("/api/stock"):
+            s._send_json(stock_report(force="force" in s.path)); return
+        if s.path.startswith("/api/gapfill"):
+            h = urllib.parse.parse_qs(urllib.parse.urlparse(s.path).query).get("hash", [""])[0]
+            s._send_json(gap_fill(h)); return
         if s.path.startswith("/api/gapverify"):
             from urllib.parse import urlparse, parse_qs
             q_ = parse_qs(urlparse(s.path).query)
@@ -5720,11 +6716,14 @@ class Handler(BaseHTTPRequestHandler):
         for r in c.execute("SELECT name,query,matched,injected,status,info_hash,source,MAX(injected) FROM torrents GROUP BY name,size ORDER BY last_searched DESC LIMIT 100").fetchall():
             st = {"done":"done","no_match":"nomatch","searching":"searching","injecting":"searching"}.get(r[4],"err")
             label = {"done":"完成","no_match":"无匹配","searching":"搜索中","injecting":"辅种中"}.get(r[4], r[4])
+            # 旧记录的 query 列为空时，仍把这次实际使用的自动关键词展示出来。
+            # 否则用户面对「无匹配」只会看到一片空白，没法判断要不要改关键词重搜。
+            used_query = r[1] or extract_query(r[0])
             manual = f"<div class=rs><input placeholder='自定义关键词' value=''><button onclick=\"research('{esc(r[5])}',this)\">重搜</button></div>"
             # 在辅站数=该内容实际在多少个站做种(注入/已存在/加tracker都算,不管是谁辅上的)
             seeded = c.execute("SELECT COUNT(DISTINCT indexer) FROM matches WHERE info_hash=? AND result IN ('injected','duplicate','tracker')", (r[5],)).fetchone()[0]
             rows += (f"<tr><td class=name title='{esc(r[0])}'><a href='/torrent?hash={esc(r[5])}'>{esc(r[0])}</a></td>"
-                     f"<td><span class=src>{esc(r[6] or '?')}</span></td><td class=mut>{esc(r[1])}</td>"
+                     f"<td><span class=src>{esc(r[6] or '?')}</span></td><td class=mut>{esc(used_query)}</td>"
                      f"<td class='r' style='color:var(--ok);font-weight:700'>{seeded}</td>"
                      f"<td><span class='b {st}'>{label}</span></td><td>{manual}</td></tr>")
         # 整理入库记录:按分类分组的海报墙
@@ -6048,6 +7047,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             qb = qb_conn()
             t = next((x for x in qb.torrents() if x.get("hash")==h), None)
+            # 护栏:只能取消**还没下完**的。原先对任意 hash 直接删任务+删数据 ——
+            # 传进来一个已完成的,数据就没了:已入库的媒体库那份是硬链接(inode 还在,文件不会消失),
+            # 但做种那份的数据被删 = 立刻掉种。已完成的要删,走「做种运营」页,那里有目录边界护栏。
+            if t and (t.get("progress") or 0) >= 1:
+                s._send_json({"ok": False, "err": "这个已经下载完成了,取消下载不适用。"
+                                                 "要删请去「🌊 做种运营」——那里会先确认数据在不在保种目录"})
+                return
             qb.delete(h, delete_files=True)   # 删任务+已下数据(取消=不要了)
             _DLMETA.pop(h, None)
             logmsg("INFO", f"用户取消下载: {(t or {}).get('name','')[:44]}")
@@ -6472,6 +7478,11 @@ def main():
     logmsg("INFO", f"PackSeed 启动，监听 {CFG['PORT']}，扫描间隔 {CFG['SCAN_INTERVAL']}s，整理入库[{org}]")
     if CFG["WECOM_TOKEN"] and CFG["WECOM_AESKEY"]:
         logmsg("INFO", f"企微双向交互就绪(AES自检{'✅' if aes_selftest() else '❌失败!'}),回调: /api/wecom")
+    try:   # 账本还是空的(首次升级到覆盖驱动辅种)→ 后台回填一次,别让人对着空面板发愣
+        if led_cov_stats()["content"] == 0:
+            logmsg("INFO", "总账为空,后台回填 tr 现有种子(只算身份,不发搜索请求)")
+            threading.Thread(target=backfill_ledger, daemon=True).start()
+    except Exception: pass
     threading.Thread(target=scanner, daemon=True).start()
     threading.Thread(target=qb_watcher, daemon=True).start()
     threading.Thread(target=notify_worker, daemon=True).start()
