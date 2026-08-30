@@ -2815,7 +2815,17 @@ a{color:var(--accL);text-decoration:none}
 .searchbar button{background:#fff;color:var(--ikb);border:0;border-radius:16px;padding:0 36px;font-size:16px;font-weight:800;cursor:pointer;transition:.15s;box-shadow:0 6px 20px rgba(0,10,60,.35)}
 .searchbar button:hover{transform:translateY(-1px)}.searchbar button:active{transform:scale(.97)}
 .sname{max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dlbtn{background:#fff;color:var(--ikb);border:0;border-radius:980px;padding:5px 16px;font-size:12px;font-weight:700;cursor:pointer;transition:.15s}
+.snamecell{max-width:560px}
+/* 一行里三块:下载按钮(不缩) + 标题(可缩、超长省略) + 角标(不缩)。
+   按钮放最左是有意的:手机上这张表是横滚的,放最右要一路滑到底才看得见,
+   而且没有任何提示右边还有东西 —— 实际用下来根本发现不了。
+   角标单独一块也是有意的:原先角标和标题共用一个省略号,长种子名会把
+   「中文音轨」「+N站」直接截没,那正是最该看见的信息。 */
+.dlrow{display:flex;align-items:center;gap:10px;min-width:0}
+.dlrow>.dlbtn{flex:0 0 auto}
+.stitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 auto}
+.sbadge{flex:0 0 auto;display:flex;align-items:center;gap:6px}
+.dlbtn{background:#fff;color:var(--ikb);border:0;border-radius:980px;padding:5px 16px;font-size:12px;font-weight:700;cursor:pointer;transition:.15s;white-space:nowrap}
 .dlbtn:hover{transform:translateY(-1px)}.dlbtn:disabled{opacity:.6;cursor:default;transform:none}
 .fbar{display:flex;gap:8px;padding:0 20px 14px;flex-wrap:wrap;align-items:center}
 .fpill{padding:6px 16px;border-radius:980px;background:rgba(255,255,255,.14);cursor:pointer;font-size:13px;font-weight:600;color:rgba(255,255,255,.8);user-select:none;transition:.18s}
@@ -3503,6 +3513,8 @@ function fwToggle(btn){
  if(!ix){toast('先在①里选要守候的站点');return;}
  fetch('/api/ks/watch?ix='+ix).then(r=>r.json()).then(function(d){toast(d.ok?'⚡ 守候已开启,新免费种自动抢':'失败');ksStatus();});
 }
+function esc4(t){return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+ .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}   /* 少转一个引号就能把 title 属性顶破 */
 var _stockPick={dead:[],offline:[],idle_big:[]};
 function stockSec(key,title,rows,gb,hint,cls){
  if(!rows.length)return '';
@@ -3510,7 +3522,7 @@ function stockSec(key,title,rows,gb,hint,cls){
   +' <button class=dlbtn style="padding:3px 10px;font-size:11px;margin-left:6px" data-sk="'+key+'" onclick="stockAll(this.dataset.sk)">全选本档</button></div><table>';
  rows.forEach(function(r,i){
   h+='<tr><td style="width:26px"><input type=checkbox data-k="'+key+'" data-h="'+r.hash+'"></td>'
-   +'<td class=name title="'+r.name.replace(/"/g,'')+'">'+r.name.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</td>'
+   +'<td class=name title="'+esc4(r.name)+'">'+esc4(r.name)+'</td>'
    +'<td class=r>'+r.sizeh+'</td><td class=mut style="font-size:12px">'+r.why+'</td></tr>';
  });
  return h+'</table>';
@@ -3554,25 +3566,25 @@ function gapLoad(btn){
   if(!d.ok||!d.rows.length){el.innerHTML='<span class=mut>暂无数据(先让辅种跑起来)</span>';return;}
   var st=d.stat||{};
   var h='<div class=mut style="margin:0 0 10px">账上共 '+(st.content||0)+' 份内容 · 已做种 '+(st.seeding||0)+' 站次 · 问过确实没有 '+(st.absent||0)+' 站次'+(st.error?' · <span style="color:var(--err)">没问成 '+st.error+' 站次</span>':'')+'</div>';
-  h+='<table><tr><th>内容</th><th class=r>体积</th><th>问遍了没</th><th>已在站</th><th>账上状况</th><th></th></tr>';
+  h+='<table><tr><th>操作 / 内容</th><th class=r>体积</th><th>问遍了没</th><th>已在站</th><th>账上状况</th></tr>';
   d.rows.forEach(function(r){
-   var nm=r.name.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+   var nm=esc4(r.name);
    var tot=d.sites||1, asked=r.seeded.length+r.absent.length+r.banned.length;
    var pct=Math.min(100,Math.round(asked*100/tot));
    var owe=r.pending.length+r.errs.length;
    var on=r.seeded.map(x=>'<span class="chip on">'+x+'</span>').join('')||'<span class=mut>—</span>';
    var bits=[];
-   if(r.pending.length)bits.push('<span class="chip wait" title="'+r.pending.join(" ")+'">还没问 '+r.pending.length+' 站</span>');
-   if(r.errs.length)bits.push('<span class="chip err" title="'+r.errs.join(" ")+'">没问成 '+r.errs.length+' 站</span>');
-   if(r.absent.length)bits.push('<span class="chip off" title="'+r.absent.join(" ")+'">确认没有 '+r.absent.length+' 站</span>');
-   h+='<tr data-sites="'+tot+'"><td class=name title="'+nm+'">'+nm+'</td><td class=r>'+r.sizeh+'</td>'
+   if(r.pending.length)bits.push('<span class="chip wait" title="'+esc4(r.pending.join(" "))+'">还没问 '+r.pending.length+' 站</span>');
+   if(r.errs.length)bits.push('<span class="chip err" title="'+esc4(r.errs.join(" "))+'">没问成 '+r.errs.length+' 站</span>');
+   if(r.absent.length)bits.push('<span class="chip off" title="'+esc4(r.absent.join(" "))+'">确认没有 '+r.absent.length+' 站</span>');
+   /* 操作按钮跟标题同格、排在最左:手机上这表是横滚的,按钮搁最右要滑几百像素才看得见 */
+   var ops=(owe?'<button class=dlbtn style="padding:5px 12px;font-size:12px;background:rgba(255,212,0,.28);color:#fff" data-h="'+r.hash+'" onclick="gapFill(this.dataset.h,this)">⚡ 补问 '+owe+' 站</button>':'')
+    +(r.absent.length?'<button class=dlbtn style="padding:5px 12px;font-size:12px" data-h="'+r.hash+'" onclick="xfer(this.dataset.h)">🚚 发种资料包</button>':'');
+   h+='<tr data-sites="'+tot+'"><td class=snamecell title="'+nm+'"><div class=dlrow>'
+    +ops+'<span class=stitle>'+nm+'</span></div></td><td class=r>'+r.sizeh+'</td>'
     +'<td><span class=covbar><i style="width:'+pct+'%"></i></span> <span class=mut>'+asked+'/'+tot+'</span></td>'
     +'<td class=gseed>'+on+'</td>'
-    +'<td class=gmiss>'+(bits.length?bits.join(''):'<span class=mut>全问遍了 🎉</span>')+'</td>'
-    +'<td style="white-space:nowrap">'
-    +(owe?'<button class=dlbtn style="padding:5px 12px;font-size:12px;background:rgba(255,212,0,.28);color:#fff" data-h="'+r.hash+'" onclick="gapFill(this.dataset.h,this)">⚡ 补问 '+owe+' 站</button> ':'')
-    +(r.absent.length?'<button class=dlbtn style="padding:5px 12px;font-size:12px" data-h="'+r.hash+'" onclick="xfer(this.dataset.h)">🚚 发种资料包</button>':'')
-    +'</td></tr>';
+    +'<td class=gmiss>'+(bits.length?bits.join(''):'<span class=mut>全问遍了 🎉</span>')+'</td></tr>';
   });
   el.innerHTML=h+'</table>';
  }).catch(function(){if(btn){btn.disabled=false;btn.textContent='刷新';}});
@@ -3809,27 +3821,35 @@ function research(h,el){
 function toast(m){var t=document.getElementById('toast');t.textContent=m;t.className='show';setTimeout(()=>t.className='',3000);}
 function mkRow(x,rs){
  var tr=document.createElement('tr');
- var c1=document.createElement('td');c1.className='sname';c1.title=x.title+'（点击打开站点种子详情页）';
- if(x.info){var a=document.createElement('a');a.href=x.info;a.target='_blank';a.rel='noreferrer';a.textContent=x.title;a.style.color='var(--fg)';c1.appendChild(a);}
- else{c1.textContent=x.title;}
+ var c1=document.createElement('td');c1.className='snamecell';c1.title=x.title+'（点击打开站点种子详情页）';
+ var row=document.createElement('div');row.className='dlrow';
+ var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';
+ b.onclick=function(e){e.stopPropagation();dl(b,x,rs);};
+ row.appendChild(b);
+ var ti=document.createElement('span');ti.className='stitle';
+ if(x.info){var a=document.createElement('a');a.href=x.info;a.target='_blank';a.rel='noreferrer';a.textContent=x.title;a.style.color='var(--fg)';ti.appendChild(a);}
+ else{ti.textContent=x.title;}
+ row.appendChild(ti);
+ var bg=document.createElement('span');bg.className='sbadge';
  if(x.alts&&x.alts.length){var mb=document.createElement('span');mb.className='mut';
-  mb.style.cssText='font-size:11px;margin-left:8px;white-space:nowrap';
-  mb.textContent='+'+x.alts.length+' 站';mb.title='另有 '+x.alts.length+' 个站有同一个发布，已合并';c1.appendChild(mb);}
+  mb.style.cssText='font-size:11px;white-space:nowrap';
+  mb.textContent='+'+x.alts.length+' 站';mb.title='另有 '+x.alts.length+' 个站有同一个发布，已合并';bg.appendChild(mb);}
  if(x.zhkind){var zb=document.createElement('span');
-  zb.style.cssText='font-size:11px;margin-left:8px;padding:1px 7px;border-radius:9px;background:rgba(64,190,120,.18);color:#3fbf6f;white-space:nowrap';
+  zb.style.cssText='font-size:11px;padding:1px 7px;border-radius:9px;background:rgba(64,190,120,.18);color:#3fbf6f;white-space:nowrap';
   zb.textContent=x.zhkind;
   zb.title=(x.zhrank>1?'种子名里明写了中文音轨（不是字幕）':'多条音轨，很可能含国语但种子名没写明，下载前建议确认');
   if(x.zhrank>2)zb.style.cssText+=';font-weight:600';
   if(x.zhrank<2)zb.style.cssText+=';background:rgba(200,160,60,.18);color:#c9a13f';
-  c1.appendChild(zb);}
+  bg.appendChild(zb);}
+ if(bg.childNodes.length)row.appendChild(bg);
+ c1.appendChild(row);
  var cq=document.createElement('td');cq.className='mut';cq.style.cssText='font-size:12px;white-space:nowrap';
  cq.textContent=((x.res?x.res+'p':'')+' '+(x.src||'')).trim()||'—';
  var cg=document.createElement('td');cg.className='mut';cg.style.fontSize='12px';cg.textContent=x.grp||'—';
  var c2=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=x.site;c2.appendChild(sp);
  var c3=document.createElement('td');c3.className='r';c3.textContent=x.sizeh;
  var c4=document.createElement('td');c4.className='r';c4.textContent=x.seeders;
- var c5=document.createElement('td');var b=document.createElement('button');b.className='dlbtn';b.textContent='下载';b.onclick=function(){dl(b,x,rs);};c5.appendChild(b);
- tr.appendChild(c1);tr.appendChild(cq);tr.appendChild(cg);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);tr.appendChild(c5);
+ tr.appendChild(c1);tr.appendChild(cq);tr.appendChild(cg);tr.appendChild(c2);tr.appendChild(c3);tr.appendChild(c4);
  return tr;
 }
 /* 一部多季的剧,种子是几十条乱序堆在一起的。按季分段、每季内把「推荐制作组」顶到最前,
@@ -3865,7 +3885,7 @@ function mkTable(rs){
  function build(){
   var tbl=document.createElement('table');
   var hd=document.createElement('tr');
-  hd.innerHTML='<th>标题</th><th>画质</th><th>制作组</th><th>站点</th><th class=r>大小</th><th class=r>做种</th><th></th>';
+  hd.innerHTML='<th>下载 / 标题</th><th>画质</th><th>制作组</th><th>站点</th><th class=r>大小</th><th class=r>做种</th>';
   tbl.appendChild(hd);
   if(!grouped){
    rs.filter(function(x){return !zhonly||x.zhaud;})
@@ -3876,7 +3896,7 @@ function mkTable(rs){
    var list=items.filter(function(x){return (!only||x.grp==best)&&(!zhonly||x.zhaud);});
    if(!list.length)return;
    var tr=document.createElement('tr'),td=document.createElement('td');
-   td.colSpan=7;td.style.cssText='padding:9px 16px 3px;font-weight:600;font-size:13px;opacity:.8';
+   td.colSpan=6;td.style.cssText='padding:9px 16px 3px;font-weight:600;font-size:13px;opacity:.8';
    td.textContent=label+'（'+list.length+'）';tr.appendChild(td);tbl.appendChild(tr);
    list.slice().sort(function(a,b){
     var pa=(best&&a.grp==best)?0:1,pb=(best&&b.grp==best)?0:1;
