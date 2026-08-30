@@ -277,6 +277,16 @@ def init_db():
     except Exception: pass
     try: c.execute("ALTER TABLE content ADD COLUMN xfer_fail INTEGER DEFAULT 0")  # 交棒连败次数
     except Exception: pass
+    # 收藏片单:一部片一行,状态落库 —— 老的榜单批量下载把任务放在内存字典里,
+    # 250 部片子搜完要几十分钟,中途重启就全丢,「每次只扫描了一半」就是这么来的。
+    c.execute("""CREATE TABLE IF NOT EXISTS collect(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT, dbid TEXT, rank INTEGER DEFAULT 0,
+        title TEXT, year TEXT, rate TEXT, tmdb_id INTEGER DEFAULT 0, tmdb_name TEXT,
+        coll_id INTEGER DEFAULT 0, coll_name TEXT,
+        status TEXT, res INTEGER DEFAULT 0, rel TEXT, site TEXT, size INTEGER DEFAULT 0,
+        url TEXT, err TEXT, ts INTEGER)""")
+    c.execute("CREATE INDEX IF NOT EXISTS ix_collect_status ON collect(status)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_collect_key ON collect(src,dbid)")
     try: c.execute("ALTER TABLE content ADD COLUMN xfer_err TEXT DEFAULT ''")     # 最后一次失败原因
     except Exception: pass
     c.commit(); c.close()
@@ -2104,7 +2114,6 @@ def emby_refresh():
         logmsg("WARN", f"通知 Emby 刷新失败: {e}")
 
 
-
 # ============ 全自动流水线：qb完成 → 识别整理入库 → 转种tr → 通知Emby ============
 def do_organize(ih, name, files, m, cat):
     """执行硬链接入库并记录。files: [(绝对源路径, 相对路径)]"""
@@ -3112,12 +3121,19 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{ou
 <span class=ppill id=apill onclick=tgA(this)>🎵 找歌手</span>
 </div>
 </div>
-<div class=card id=dbshelf><h2>🎞 豆瓣经典榜 <span class=mut style=font-weight:400>· 按豆瓣评分排的高分经典 · 点海报直接全站找源,选个站就能下</span><span class=dbsrc id=dbsrc></span>
-<button class=dlbtn style="padding:4px 13px;font-size:12px;margin-left:8px" onclick=dbMore()>换一批</button>
-<button class=dlbtn style="padding:4px 13px;font-size:12px;margin-left:6px" onclick=batchOpen()>📦 批量下载本榜</button></h2>
-<div id=batchbox style="padding:0 20px 12px;display:none"></div>
-<div class=dbtabs id=dbtabs></div>
-<div class=dbflow><div class=dbtrack id=dbtrack><span class=mut style=padding:12px>载入中…</span></div></div></div>
+<div class=card id=colshelf><h2>🎬 经典电影收藏 <span class=mut style=font-weight:400>· 豆瓣 Top250 全量(不是一页一页翻,是整份 250 部) · 系列电影按 TMDB 自动补齐 · 进度落库,关了浏览器/重启容器都接着跑</span></h2>
+<div style="padding:2px 20px 8px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px">
+<button class=dlbtn onclick="colFetch(this)">① 取片单</button>
+<span class=mut>画质</span>
+<select id=col-res class=ksin style="min-width:104px"><option value=1080 selected>1080p</option><option value=2160>2160p (4K)</option><option value=720>720p</option></select>
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type=checkbox id=col-loose>没有就降级</label>
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type=checkbox id=col-series checked>系列自动补齐</label>
+<button class=dlbtn onclick="colScan(this)">② 开始找片源</button>
+<button class=dlbtn style="background:rgba(255,255,255,.2);color:#fff" onclick="colStop()">⏹ 停</button>
+<span class=mut id=col-prog style="font-size:12px"></span>
+</div>
+<div id=colstat style="padding:0 20px 10px"></div>
+<div id=collist style="padding:0 20px 16px"></div></div>
 <div id=sresult></div>
 <div class=stats id=dash>
 <div class=stat><div class=n id=d-disk>—</div><div class=l id=d-diskl>存储剩余</div></div>
@@ -4007,80 +4023,97 @@ function renderWall(){
 }
 /* ---- 豆瓣片单货架 ---- */
 /* 第三项 = 搜索时的类型限定:榜单自己就知道是剧还是电影,没必要再去全类别捞一遍 */
-var DBS=[['cn_tv','🇨🇳 国产剧','tv'],['us_tv','🇺🇸 美剧','tv'],['uk_tv','🇬🇧 英剧','tv'],['jp_tv','🇯🇵 日剧','tv'],
- ['kr_tv','🇰🇷 韩剧','tv'],['jp_anime','🎌 日本动画','anime'],['doc','📽 纪录片','tv'],['classic','🎬 经典电影','movie']];
-var _dbcol='cn_tv',_dbtype='tv',_dbstart=0,_dbback=false;
-function dbInit(){
- var tb=document.getElementById('dbtabs');if(!tb)return;
- DBS.forEach(function(c){
-  var e=document.createElement('span');e.className='dbtab';e.textContent=c[1];e.dataset.c=c[0];
-  e.onclick=function(){if(_dbcol==c[0])return;_dbcol=c[0];_dbtype=c[2]||'';_dbstart=0;dbLoad();};
-  tb.appendChild(e);
- });
- dbLoad();
+var _dbback=false;   /* 豆瓣货架已撤,这个标记留给「返回结果」按钮的逻辑 */
+/* ---- 经典电影收藏 ---- */
+var _colTimer=null,_colTab='ready';
+var COLST={ready:'找到片源',owned:'库里已有',pushed:'已推送',nores:'没有这个画质',notfound:'各站都搜不到',pending:'还没查'};
+function colFetch(btn){
+ btn.disabled=true;btn.textContent='取片单中…';
+ fetch('/api/collect/fetch').then(r=>r.json()).then(function(){
+  toast('正在抓豆瓣 Top250,十几秒;抓完点「开始找片源」');
+  colPoll(true);
+  setTimeout(function(){btn.disabled=false;btn.textContent='① 取片单';},3000);
+ }).catch(function(){btn.disabled=false;btn.textContent='① 取片单';toast('取片单出错');});
 }
-function dbMsg(txt){
- var tr=document.getElementById('dbtrack');tr.innerHTML='';
- var m=document.createElement('span');m.className='mut';m.style.padding='12px';m.textContent=txt;tr.appendChild(m);
+function colScan(btn){
+ var res=document.getElementById('col-res').value;
+ var loose=document.getElementById('col-loose').checked?'0':'1';
+ var ser=document.getElementById('col-series').checked?'1':'0';
+ fetch('/api/collect/scan?res='+res+'&strict='+loose+'&series='+ser).then(r=>r.json()).then(function(){
+  toast('开始逐部找片源。每部约 1~2 秒,250 部大概十来分钟,可以关页面');
+  colPoll(true);
+ }).catch(function(){toast('启动出错');});
 }
-function dbLoad(){
- document.querySelectorAll('.dbtab').forEach(function(e){e.classList.toggle('on',e.dataset.c==_dbcol);});
- dbMsg('载入中…');
- fetch('/api/douban?col='+_dbcol+'&start='+_dbstart).then(r=>r.json()).then(function(d){
-  var src=document.getElementById('dbsrc');
-  if(!d.ok||!(d.items||[]).length){
-   dbMsg('这个榜单暂时取不到（'+((d&&d.err)||'豆瓣没响应')+'），换个榜单或稍后再看');
-   if(src)src.textContent='';return;}
-  if(src)src.textContent=(d.src=='tmdb'?'· 豆瓣没连上，先用 TMDB 高分榜顶着':'· 来自豆瓣');
-  var tr=document.getElementById('dbtrack');tr.innerHTML='';
-  d.items.forEach(function(it){tr.appendChild(dbCard(it));});
-  tr.parentNode.scrollLeft=0;
- }).catch(function(){dbMsg('榜单请求出错，检查网络或豆瓣代理设置');});
+function colStop(){fetch('/api/collect/stop').then(function(){toast('已停,再点「开始找片源」会从断点接着跑');});}
+function colPoll(on){
+ if(_colTimer){clearInterval(_colTimer);_colTimer=null;}
+ colStat();
+ if(on)_colTimer=setInterval(colStat,4000);
 }
-function dbMore(){_dbstart+=24;if(_dbstart>168)_dbstart=0;dbLoad();}
-function dbCard(it){
- var d=document.createElement('div');d.className='dbitem';
- var w=document.createElement('div');w.style.position='relative';
- var src=it.cover?('/api/dbimg?u='+encodeURIComponent(it.cover))
-        :(it.tmdb_poster?('/api/poster?p='+encodeURIComponent(it.tmdb_poster)):'');
- /* 这里刻意不用 loading=lazy:横滚容器里的懒加载在浏览器看来「永远没进视口」,
-    24 张海报会全部停在 0x0 不发请求(实测 currentSrc 一直是空的,换成 eager 立刻就出图)。
-    货架固定 24 张、服务端已预热到本地磁盘,直接加载最稳。 */
- if(src){var im=document.createElement('img');im.className='pw';im.alt=it.title;im.src=src;w.appendChild(im);}
- else{var ph=document.createElement('div');ph.className='ph';ph.textContent='🎬';w.appendChild(ph);}
- if(it.rate){var rt=document.createElement('div');rt.className='dbrate';rt.textContent='★ '+it.rate;w.appendChild(rt);}
- if(it.owned){var ob=document.createElement('div');ob.className='ownbadge';ob.textContent='✓ 已有';w.appendChild(ob);}
- d.appendChild(w);
- var nm=document.createElement('div');nm.className='pname';nm.textContent=it.title;d.appendChild(nm);
- var mt=document.createElement('div');mt.className='pmeta';mt.textContent=(it.year||'')+(it.owned?' · 库里有了':'');d.appendChild(mt);
- d.title=it.sub||it.title;
- d.onclick=function(){dbPick(it);};
- return d;
+function colStat(){
+ fetch('/api/collect/stats').then(r=>r.json()).then(function(d){
+  if(!d.ok)return;
+  var by=d.by||{};
+  var pg=document.getElementById('col-prog');
+  if(pg)pg.textContent=d.running?('正在查《'+(d.stage||'')+'》 '+d.done+'/'+d.scanning_total):(d.msg||'');
+  if(!d.running&&_colTimer&&!(by.pending>0)){clearInterval(_colTimer);_colTimer=null;}
+  var el=document.getElementById('colstat');
+  if(!d.total){el.innerHTML='<span class=mut>还没有片单。点「① 取片单」拉豆瓣 Top250。</span>';
+   document.getElementById('collist').innerHTML='';return;}
+  var chips=Object.keys(COLST).filter(function(k){return by[k];}).map(function(k){
+   return '<span class="chip'+(k==_colTab?' on':' off')+'" style="cursor:pointer" data-s="'+k+'" onclick="colTab(this.dataset.s)">'+COLST[k]+' '+by[k]+'</span>';
+  }).join('');
+  var fit=d.fits?'<span style="color:var(--ok)">装得下</span>':'<span style="color:var(--err)">装不下,要分批推</span>';
+  var h='<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">'+chips+'</div>';
+  h+='<div class=mut style="font-size:12px">片单共 '+d.total+' 部 · 已找到片源 '+d.ready_n+' 部,合计 '+d.ready_sizeh
+   +' · 磁盘剩余 '+d.freeh+'(保护线 '+d.guard_gb+'GB) → '+fit+'</div>';
+  if(d.ready_n)h+='<div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">'
+   +'<button class=dlbtn onclick="colPush(0,this)">推送全部 '+d.ready_n+' 部（'+d.ready_sizeh+'）</button>'
+   +'<button class=dlbtn style="background:rgba(255,255,255,.2);color:#fff" onclick="colPush(500,this)">只推 500GB</button>'
+   +'<span class=mut style="font-size:12px">推给 qb 后走正常流水线:下完自动识别入库、交棒 tr、后台辅种</span></div>';
+  el.innerHTML=h;
+  colList();
+ }).catch(function(){});
 }
-/* 榜单里的剧常常按季收录(「老友记 第十季」「绝命毒师  第五季」)。
-   点进来八成是想要整部剧,所以砍掉季号搜全剧;季号一砍,那个年份也是这一季的年份,一并丢掉,
-   否则会拿第十季的年份去卡全剧的种子。不带季号的条目(电影/单本剧)才保留年份限定。 */
-function dbQuery(it){
- var t=(it.title||'').split('  ').join(' ').trim(),season=false;
- var p=t.indexOf(' 第');
- if(p>0&&t.charAt(t.length-1)=='季'){t=t.substring(0,p).trim();season=true;}
- return t+((!season&&it.year)?' '+it.year:'');
+function colTab(st){_colTab=st;colList();}
+function colList(){
+ fetch('/api/collect/list?status='+_colTab+'&limit=300').then(r=>r.json()).then(function(d){
+  var el=document.getElementById('collist');
+  if(!d.ok||!d.rows.length){el.innerHTML='<span class=mut>这一档现在没有条目</span>';return;}
+  var showRel=(_colTab=='ready'||_colTab=='pushed');
+  var h='<table><tr><th>片名</th><th class=r>评分</th><th>'+(showRel?'选中的版本':'情况')+'</th>'
+   +(showRel?'<th>站点</th><th class=r>大小</th>':'')+'</tr>';
+  d.rows.forEach(function(r){
+   var series=r.coll_name?'<span class="chip off" style="margin-left:6px">'+esc4(r.coll_name)+'</span>':'';
+   h+='<tr><td class=sname title="'+esc4(r.title)+'">'+(r.rank?('<span class=mut>'+r.rank+'. </span>'):'')
+    +esc4(r.title)+(r.year?' <span class=mut>('+r.year+')</span>':'')+series+'</td>'
+    +'<td class=r>'+(r.rate?('★'+r.rate):'')+'</td>';
+   if(showRel)h+='<td class=sname title="'+esc4(r.rel)+'">'+esc4(r.rel)+'</td>'
+    +'<td><span class=src>'+esc4(r.site)+'</span></td><td class=r>'+r.sizeh+'</td>';
+   else h+='<td class=mut>'+esc4(r.err||'')+'</td>';
+   h+='</tr>';
+  });
+  h+='</table>';
+  if(_colTab=='nores'||_colTab=='notfound')
+   h+='<div style="margin-top:10px"><button class=dlbtn style="background:rgba(255,255,255,.2);color:#fff" data-s="'+_colTab+'" onclick="colReset(this.dataset.s)">把这 '+d.rows.length+' 部放回队列重查</button>'
+    +'<span class=mut style="font-size:12px;margin-left:8px">想降画质就先勾上「没有就降级」再重查</span></div>';
+  el.innerHTML=h;
+ }).catch(function(){});
 }
-function dbPick(it){
- var box=document.getElementById('sresult');
- _backto=null;_dbback=true;_pmode=false;
- var pp=document.getElementById('ppill');if(pp)pp.classList.remove('on');
- var q=dbQuery(it);
- document.getElementById('q').value=q;
- /* 榜单已经告诉我们是剧还是电影,把类型按钮也点上,搜索范围和界面保持一致 */
- _sf=_dbtype;
- document.querySelectorAll('.fpill').forEach(function(e){e.classList.toggle('on',e.dataset.f==_dbtype);});
- box.innerHTML=VOYAGE;
- box.scrollIntoView({behavior:'smooth',block:'start'});
- fetch('/api/search2?q='+encodeURIComponent(q)+'&f='+_sf).then(r=>r.json()).then(function(d){
-  if(!d.ok){box.innerHTML='<div class=mut style="padding:10px 16px">提交失败：'+(d.err||'')+'</div>';return;}
-  pollJob(d.id,box,Date.now());
- }).catch(function(){box.innerHTML='<div class=mut style="padding:10px 16px">提交出错</div>';});
+function colReset(st){
+ fetch('/api/collect/reset?status='+st).then(r=>r.json()).then(function(){
+  toast('已放回队列,点「开始找片源」重查');colStat();});
+}
+function colPush(cap,btn){
+ if(!confirm(cap?('推送这一批,上限 '+cap+'GB?'):'把全部找到片源的电影推给 qb 下载?'))return;
+ btn.disabled=true;btn.textContent='推送中…';
+ fetch('/api/collect/push',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({cap_gb:cap})}).then(r=>r.json()).then(function(d){
+  btn.disabled=false;
+  if(!d.ok){toast('推送失败: '+(d.err||''));return;}
+  toast('已推送 '+d.pushed.length+' 部,共 '+d.usedh+(d.skipped.length?(' · 跳过 '+d.skipped.length+' 部'):''));
+  colStat();
+ }).catch(function(){btn.disabled=false;toast('推送出错');});
 }
 /* ---- 找人:演员/导演片单。全程 DOM API 拼,不拼 HTML 字符串 ---- */
 var _pmode=false,_pd=null,_pmore=false,_backto=null;
@@ -4443,110 +4476,6 @@ function dl(b,x,rs){
   else{b.textContent='失败';b.disabled=false;toast('下载失败：'+(d.err||''));}
  }).catch(e=>{b.textContent='失败';b.disabled=false;toast('下载出错');});
 }
-function batchOpen(){
- var b=document.getElementById('batchbox');
- if(b.style.display!='none'){b.style.display='none';return;}
- b.style.display='block';b.innerHTML='';
- var lab=DBS.filter(function(x){return x[0]==_dbcol;}).map(function(x){return x[1];})[0]||_dbcol;
- var c=document.createElement('div');c.className='cachetip';c.style.marginLeft='0';
- var t=document.createElement('span');
- t.textContent='从「'+lab+'」批量下载：只搜几个大站选最优版本，下完由后台辅种铺到全部站点。';
- var sel=document.createElement('select');sel.style.cssText='margin:0 6px;padding:3px 8px;border-radius:8px';
- [25,50,100,250].forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent='前 '+n+' 部';sel.appendChild(o);});
- var k=document.createElement('label');k.style.cssText='font-size:12px;margin-right:8px';
- var kb=document.createElement('input');kb.type='checkbox';kb.style.marginRight='4px';
- k.appendChild(kb);k.appendChild(document.createTextNode('优先 4K'));
- var go=document.createElement('button');go.textContent='开始扫描';
- go.onclick=function(){batchPlan(sel.value,kb.checked?1:0,go);};
- c.appendChild(t);c.appendChild(sel);c.appendChild(k);c.appendChild(go);b.appendChild(c);
- var d=document.createElement('div');d.id='batchres';b.appendChild(d);
-}
-function batchPlan(n,k,btn){
- _noReload=true;clearTimeout(_t);_t=null;
- btn.disabled=true;btn.textContent='扫描中…';
- var box=document.getElementById('batchres');
- box.innerHTML='<div class=mut id=bpTip>准备中…</div>';
- fetch('/api/batchplan?col='+_dbcol+'&n='+n+'&k='+k).then(r=>r.json()).then(function(d){
-  if(!d.ok){box.innerHTML='<div class=mut>提交失败：'+(d.err||'')+'</div>';btn.disabled=false;btn.textContent='开始扫描';return;}
-  batchPoll(d.id,box,btn);
- }).catch(function(){box.innerHTML='<div class=mut>提交出错</div>';btn.disabled=false;btn.textContent='开始扫描';});
-}
-function batchPoll(id,box,btn){
- fetch('/api/batchstat?id='+id).then(r=>r.json()).then(function(j){
-  if(!j.ok){box.innerHTML='<div class=mut>'+(j.err||'任务丢失')+'</div>';btn.disabled=false;btn.textContent='开始扫描';return;}
-  if(!j.fin){
-   var e=document.getElementById('bpTip');
-   if(e)e.textContent='扫描中 '+j.done+'/'+j.total+' —— 正在查「'+(j.cur||'')+'」（每部约 10 秒，可以先干别的）';
-   setTimeout(function(){batchPoll(id,box,btn);},1500);return;
-  }
-  btn.disabled=false;btn.textContent='重新扫描';
-  batchRender(j.rows||[],box);
- }).catch(function(){setTimeout(function(){batchPoll(id,box,btn);},3000);});
-}
-function batchRender(rows,box){
- box.innerHTML='';
- var can=rows.filter(function(r){return r.url;});
- var skip=rows.filter(function(r){return !r.url;});
- var head=document.createElement('div');head.className='gt';head.style.margin='8px 0 6px';
- head.textContent='可下载 '+can.length+' 部 · 跳过 '+skip.length+' 部';box.appendChild(head);
- var tb=document.createElement('table');
- var hr=document.createElement('tr');
- ['','片名','评分','选中的版本','站点','大小','做种'].forEach(function(h){
-  var th=document.createElement('th');th.textContent=h;hr.appendChild(th);});
- tb.appendChild(hr);
- can.forEach(function(r){
-  var tr=document.createElement('tr');
-  var c0=document.createElement('td');
-  var cb=document.createElement('input');cb.type='checkbox';cb.checked=true;cb.dataset.i=rows.indexOf(r);
-  cb.className='bsel';c0.appendChild(cb);
-  var c1=document.createElement('td');c1.textContent=r.title+(r.year?' ('+r.year+')':'');
-  var c2=document.createElement('td');c2.className='mut';c2.textContent=r.rate?('★'+r.rate):'';
-  var c3=document.createElement('td');c3.className='sname';c3.title=r.rel;c3.textContent=r.rel;
-  if(r.noxfer){var w=document.createElement('span');w.className='mut';w.style.color='#FFD400';
-   w.textContent=' [禁转]';c3.appendChild(w);}
-  var c4=document.createElement('td');var sp=document.createElement('span');sp.className='src';sp.textContent=r.site;c4.appendChild(sp);
-  var c5=document.createElement('td');c5.className='r';c5.textContent=r.size;
-  var c6=document.createElement('td');c6.className='r';c6.textContent=r.seeders;
-  [c0,c1,c2,c3,c4,c5,c6].forEach(function(x){tr.appendChild(x);});
-  tb.appendChild(tr);
- });
- box.appendChild(tb);
- if(skip.length){
-  var sh=document.createElement('div');sh.className='gt';sh.style.margin='12px 0 6px';
-  sh.textContent='跳过的';box.appendChild(sh);
-  var st=document.createElement('table');
-  skip.forEach(function(r){
-   var tr=document.createElement('tr');
-   var a=document.createElement('td');a.textContent=r.title+(r.year?' ('+r.year+')':'');
-   var b2=document.createElement('td');b2.className='mut';b2.textContent=r.skip||'';
-   tr.appendChild(a);tr.appendChild(b2);st.appendChild(tr);});
-  box.appendChild(st);
- }
- if(can.length){
-  var bar=document.createElement('div');bar.style.marginTop='12px';
-  var all=document.createElement('button');all.className='dlbtn';all.style.marginRight='8px';
-  all.textContent='全选/全不选';
-  all.onclick=function(){var cs=document.querySelectorAll('.bsel');var v=!cs[0].checked;
-   cs.forEach(function(x){x.checked=v;});};
-  var go=document.createElement('button');go.className='dlbtn';
-  go.textContent='推送到 qb 下载';
-  go.onclick=function(){
-   var picked=[];document.querySelectorAll('.bsel').forEach(function(x){
-    if(x.checked)picked.push(rows[parseInt(x.dataset.i)]);});
-   if(!picked.length){toast('一部都没选');return;}
-   go.disabled=true;go.textContent='推送中…（每部间隔 2 秒）';
-   fetch('/api/batchgo',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({rows:picked})}).then(r=>r.json()).then(function(d){
-     go.textContent=d.ok?('✅ 已推送 '+d.added+' 部'+(d.failed?('，失败 '+d.failed):'')):'推送失败';
-     toast(d.ok?('已推送 '+d.added+' 部到 qb，去「下载管理」看进度'):(d.err||'失败'));
-    }).catch(function(){go.disabled=false;go.textContent='推送到 qb 下载';toast('推送出错');});
-  };
-  bar.appendChild(all);bar.appendChild(go);box.appendChild(bar);
-  var note=document.createElement('div');note.className='mut';note.style.cssText='margin-top:6px;font-size:12px';
-  note.textContent='下载完会自动识别→硬链接进媒体库→转种到 tr→后台辅种铺开到几十个站。[禁转] 标记的种不会被转出去，但正常做种。';
-  box.appendChild(note);
- }
-}
 function libAudit(btn){
  var box=document.getElementById('libaudit');
  if(btn){btn.disabled=true;btn.textContent='体检中…';}
@@ -4648,8 +4577,8 @@ function reid(h,el){
    else{toast('失败：'+(d.err||''));el.disabled=false;el.textContent='确认入库';}})
   .catch(e=>{toast('出错');el.disabled=false;el.textContent='确认入库';});
 }
-dbInit();       /* 放在最末尾:DBS/_dbcol 是 var,提前调用时它们还是 undefined */
 restoreSearch();/* 刷新页面后把上次的搜索结果捞回来 */
+colStat();
 </script></body></html>"""
 
 DETAIL = """<!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -4928,18 +4857,6 @@ def search_group(q, results, log=lambda m: None, anchor=None):
 # 国产剧头几位是大明王朝1566/西游记/红楼梦,日剧是白色巨塔,韩剧是请回答1988。
 # 换成热门榜就全是本周新番,不是用户要的东西。
 # 豆瓣认 Referer,不带就 403/404,所以必须自己代发;豆瓣挂了也不许首页开天窗 → 回落 TMDB 高分榜。
-DOUBAN_SHELVES = [
-    ("cn_tv",   "🇨🇳 国产剧",  "tv",    "国产剧"),
-    ("us_tv",   "🇺🇸 美剧",    "tv",    "美剧"),
-    ("uk_tv",   "🇬🇧 英剧",    "tv",    "英剧"),
-    ("jp_tv",   "🇯🇵 日剧",    "tv",    "日剧"),
-    ("kr_tv",   "🇰🇷 韩剧",    "tv",    "韩剧"),
-    ("jp_anime","🎌 日本动画",  "tv",    "日本动画"),
-    ("doc",     "📽 纪录片",   "tv",    "纪录片"),
-    ("classic", "🎬 经典电影",  "movie", "经典"),
-]
-DOUBAN_COLS = {k: (lab, mt, tag) for k, lab, mt, tag in DOUBAN_SHELVES}
-_DB_CACHE = {}
 _DB_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 "
           "(KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1")
 
@@ -4978,84 +4895,6 @@ def _dbimg_warm(url):
     except Exception:
         pass
 
-def _douban_year(mt, sid):
-    """排行榜接口不给年份,只能按 id 去补。年份对搜索很关键:西游记 1986 和 2010 是两码事。"""
-    try:
-        d = json.load(_douban_open(f"https://m.douban.com/rexxar/api/v2/{mt}/{sid}",
-                                   f"https://m.douban.com/movie/subject/{sid}/", timeout=8))
-        return str(d.get("year") or "")[:4]
-    except Exception:
-        return ""
-
-def _douban_fetch(col, start, count):
-    lab, mt, tag = DOUBAN_COLS[col]
-    u = ("https://movie.douban.com/j/search_subjects?type=" + mt
-         + "&tag=" + urllib.parse.quote(tag) + "&sort=rank"
-         + f"&page_limit={count}&page_start={start}")
-    d = json.load(_douban_open(u, "https://movie.douban.com/explore"))
-    out = []
-    for it in (d.get("subjects") or []):
-        t = (it.get("title") or "").strip()
-        if not t: continue
-        out.append({"title": t, "year": "", "id": str(it.get("id") or ""),
-                    "cover": it.get("cover") or "", "rate": str(it.get("rate") or ""),
-                    "sub": "", "url": it.get("url") or ""})
-    if out:   # 并发补年份 + 预热海报,给 12 秒预算,补不齐就算了(没年份也能搜,只是少一层限定)
-        from concurrent.futures import ThreadPoolExecutor, wait
-        ex = ThreadPoolExecutor(max_workers=10)
-        def fill(x):
-            if x["id"]: x["year"] = _douban_year(mt, x["id"])
-        try:
-            fs = [ex.submit(fill, x) for x in out] + [ex.submit(_dbimg_warm, x["cover"]) for x in out]
-            wait(fs, timeout=12)
-        finally:
-            try: ex.shutdown(wait=False, cancel_futures=True)
-            except TypeError: ex.shutdown(wait=False)
-    return out
-
-def _douban_fallback(col, count):
-    """豆瓣不通时的兜底:TMDB 高分榜。字段和豆瓣那边对齐,前端无感。"""
-    mt = DOUBAN_COLS.get(col, ("", "tv", ""))[1]
-    try:
-        rs = _tmdb_call(f"/{mt}/top_rated", language="zh-CN", page=1).get("results", [])
-    except Exception:
-        return []
-    return [{"title": (r.get("name") or r.get("title") or ""), "year": _ryear(r),
-             "cover": "", "tmdb_poster": r.get("poster_path") or "", "id": "",
-             "rate": str(round(r.get("vote_average") or 0, 1)),
-             "sub": (r.get("overview") or "")[:60], "url": ""} for r in rs[:count]]
-
-def douban_shelf(col, start=0, count=24):
-    """一个榜单的片单,缓存 6 小时(按 榜单+起点 分开缓存,「换一批」不会顶掉别的)。"""
-    if col not in DOUBAN_COLS: return {"ok": False, "err": "未知榜单"}
-    ck = f"{col}|{start}|{count}"
-    hit = _DB_CACHE.get(ck)
-    if hit and time.time() - hit[1] < 21600:
-        items, src = hit[0]
-    else:
-        src = "douban"
-        try:
-            items = _douban_fetch(col, start, count)
-            if not items: raise RuntimeError("空列表")
-        except Exception as e:
-            logmsg("WARN", f"豆瓣榜单[{col}]取不到({str(e)[:40]}),回落 TMDB 高分榜")
-            items = _douban_fallback(col, count); src = "tmdb"
-        if len(_DB_CACHE) > 60: _DB_CACHE.clear()
-        _DB_CACHE[ck] = ((items, src), time.time())
-    # 已入库标注实时算:库天天在变,不能跟着片单一起冻 6 小时
-    ix = library_index()
-    out = []
-    for it in items:
-        x = dict(it)
-        # 豆瓣榜按「季」收录:标题是「老友记 第十季」、年份是那一季的 2003,
-        # 而库里存的是剧集级的「老友记」+ 首播年 1994 —— 名字和年份双双对不上,
-        # 直接比对会把满库的剧全标成"没有"。所以:剥掉季号,并且带季号时不比年份。
-        base = _strip_season(x["title"])
-        x["owned"] = owned_label(ix, "", 0, base,
-                                 "" if base != x["title"] else (x.get("year") or ""))
-        out.append(x)
-    return {"ok": True, "col": col, "src": src, "start": start,
-            "label": DOUBAN_COLS[col][0], "items": out}
 
 # ============ 歌手专辑(按年代排序 + 经典度评分 + 推荐) ============
 # 为什么不是简单搜一下:PT 搜索结果是按做种数堆在一起的一坨,分不清哪张是正传、哪张是精选、
@@ -5192,6 +5031,258 @@ def artist_albums(artist, log=lambda m: None):
     return {"ok": True, "artist": artist, "rows": rows,
             "nodisc": len(disc) == 0, "pool": len(pool)}
 
+# ============ §10 作业·经典电影收藏 ============
+# 老的「豆瓣货架 + 榜单批量下载」有三个硬伤,是这次重做的原因:
+#   ① 抓不全:走 j/search_subjects 接口,翻到一定深度就返回空,永远只能拿到一半
+#   ② 下不了:_pick_release 的体积窗口是 2~25GB,而 2160p 电影普遍 20~80GB,
+#      4K 版本几乎全被这个窗口过滤掉 —— 注释里写的「太大不适合批量囤」这个假设,
+#      跟「都要 2160p」正面冲突
+#   ③ 会丢:任务只存在内存字典里,250 部片子搜几十分钟,中途重启就全没了
+# 现在:片单固定走豆瓣 Top250(有明确边界的 250 部),状态落库可断点续跑,
+# 分辨率是硬要求不是加分项,系列电影按 TMDB collection 自动展开。
+
+DOUBAN_TOP250 = "https://movie.douban.com/top250"
+# 页面结构:item → pic(subject id) → hd(第一个 span.title 是中文名) → bd > p(导演/年份/国别) → rating_num
+# 注意 <p> 上没有 class 属性,写成 <p class=""> 会一条都匹配不到(踩过)。
+_T250_ITEM = re.compile(
+    r'<div class="item">.*?subject/(\d+)/.*?<span class="title">([^<]+)</span>'
+    r'.*?<div class="bd">.*?<p[^>]*>(.*?)</p>.*?property="v:average">([\d.]+)<', re.S)
+
+def douban_top250(log=lambda m: None):
+    """抓完整的豆瓣 Top250。走 HTML 页面而不是 j/search_subjects 接口 ——
+       那个接口翻深了就返回空,这正是老版「每次只扫描了一半」的原因。
+       Top250 是 10 页 × 25 条,边界明确,结构也稳定。"""
+    out = []
+    for page in range(10):
+        u = f"{DOUBAN_TOP250}?start={page*25}&filter="
+        try:
+            h = _douban_open(u, "https://movie.douban.com/").read().decode("utf-8", "ignore")
+        except Exception as e:
+            log(f"⚠️ 第 {page+1} 页抓取失败: {str(e)[:40]}")
+            break
+        n = 0
+        for m in _T250_ITEM.finditer(h):
+            dbid, title, meta, rate = m.group(1), m.group(2).strip(), m.group(3), m.group(4)
+            ym = re.search(r'(\d{4})&nbsp;', meta) or re.search(r'(19|20)\d{2}', meta)
+            year = (ym.group(1) if ym and ym.lastindex else ym.group(0)[:4]) if ym else ""
+            year = year if year.isdigit() and len(year) == 4 else (re.search(r'(19|20)\d{2}', meta).group(0) if re.search(r'(19|20)\d{2}', meta) else "")
+            out.append({"dbid": dbid, "title": title, "year": year, "rate": rate,
+                        "rank": len(out) + 1})
+            n += 1
+        log(f"📄 第 {page+1}/10 页:{n} 部(累计 {len(out)})")
+        if not n: break
+        time.sleep(1.5)                 # 节流:别把豆瓣刷毛了
+    return out
+
+# 分辨率决定体积窗口。用一个全局窗口是老版下不了 4K 的直接原因。
+RES_WINDOW = {2160: (10, 150), 1080: (2, 30), 720: (0.7, 8)}
+
+def pick_for_collect(results, want_res=1080, strict=True):
+    """给「无人值守批量收藏」挑一个种子。与 _pick_release 的关键区别:
+       **分辨率是硬过滤,不是加分项**。老版靠 score_release 里 +200 分表达偏好,
+       可基数是做种数 —— 一个 500 做种的 1080p 照样压过 100 做种的 2160p,
+       所以嘴上说要 4K,拿回来的还是 1080p。
+       strict=False 时才允许降级到更低分辨率。"""
+    rs = [parse_release(r) for r in results]
+    order = [want_res] if strict else [want_res] + [x for x in (2160, 1080, 720) if x != want_res]
+    for res in order:
+        lo, hi = RES_WINDOW.get(res, (1, 200))
+        cand = [r for r in rs if r.get("res") == res
+                and lo * 1024**3 <= (r.get("size") or 0) <= hi * 1024**3]
+        if cand:
+            return max(cand, key=lambda r: score_release(r, "collect", prefer_4k=(res == 2160)))
+    return None
+
+def _tmdb_collection(tmdb_id):
+    """这部电影属于哪个系列,系列里都有哪几部。TMDB 的 belongs_to_collection 就是干这个的
+       (教父三部曲/指环王/黑客帝国…)。返回 (系列id, 系列名, [成员...])。"""
+    try:
+        d = _tmdb_call(f"/movie/{int(tmdb_id)}", language="zh-CN")
+    except Exception:
+        return 0, "", []
+    c = d.get("belongs_to_collection") or {}
+    cid = c.get("id") or 0
+    if not cid: return 0, "", []
+    try:
+        cd = _tmdb_call(f"/collection/{int(cid)}", language="zh-CN")
+    except Exception:
+        return cid, c.get("name") or "", []
+    parts = []
+    for p in (cd.get("parts") or []):
+        rd = (p.get("release_date") or "")[:4]
+        if not p.get("id"): continue
+        # 未上映的没法下,别塞进队列当垃圾
+        if rd and rd.isdigit() and int(rd) > time.localtime().tm_year: continue
+        parts.append({"tmdb_id": p["id"], "title": p.get("title") or p.get("original_title") or "",
+                      "year": rd})
+    return cid, cd.get("name") or c.get("name") or "", parts
+
+_COL = {"running": False, "stop": False, "msg": "", "stage": "", "done": 0, "total": 0}
+
+def collect_add(rows, src, log=lambda m: None):
+    """把一批片子入队(按 src+dbid 去重,重复运行不会灌出一堆重复行)。"""
+    n = 0
+    c = db()
+    for r in rows:
+        try:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO collect(src,dbid,rank,title,year,rate,tmdb_id,coll_id,coll_name,"
+                "status,err,ts) VALUES(?,?,?,?,?,?,?,?,?,'pending','',?)",
+                (src, str(r.get("dbid") or r.get("tmdb_id") or r.get("title")), int(r.get("rank") or 0),
+                 r.get("title") or "", r.get("year") or "", str(r.get("rate") or ""),
+                 int(r.get("tmdb_id") or 0), int(r.get("coll_id") or 0), r.get("coll_name") or "",
+                 int(time.time())))
+            n += cur.rowcount
+        except Exception:
+            continue
+    c.commit(); c.close()
+    return n
+
+def _collect_one(row, ix, want_res, strict, expand_series, log):
+    """处理片单里的一部。返回该写回的状态字典。"""
+    cid, src, title, year, tmdb_id = row["id"], row["src"], row["title"], row["year"], row["tmdb_id"]
+    # ① 库里已经有了就别重复下
+    owned = owned_label(ix, "", 0, title, year or "")
+    if owned:
+        return {"status": "owned", "err": ""}
+    # ② 锚定到 TMDB(拿 id 才能查系列,也才能判断搜回来的是不是这一部)
+    q = title + ((" " + year) if year else "")
+    name, yy = split_query(q)
+    anchor = query_anchor(name, yy or year, "movie")
+    if anchor and anchor.get("id") and not tmdb_id:
+        tmdb_id = anchor["id"]
+    # ③ 系列展开:属于某个系列的,把系列其他部也拉进队列
+    if expand_series and tmdb_id:
+        try:
+            coll_id, coll_name, parts = _tmdb_collection(tmdb_id)
+            if coll_id and parts:
+                add = [{"tmdb_id": p["tmdb_id"], "title": p["title"], "year": p["year"],
+                        "coll_id": coll_id, "coll_name": coll_name} for p in parts]
+                got = collect_add(add, "series")
+                if got: log(f"🎬 《{title}》属于「{coll_name}」系列,补入 {got} 部")
+        except Exception as e:
+            log(f"⚠️ 查系列失败 {title}: {str(e)[:30]}")
+    # ④ 搜索 + 挑片源
+    pol = POLICY["harvest"]
+    sites = [x for x in CFG["BATCH_SITES"].split(",") if x.strip()]
+    try:
+        res = prowlarr_search_fan([name], cats=FILTER_CATS["movie"], only=sites,
+                                  per_timeout=pol["timeout"], deadline=pol["deadline"],
+                                  workers=pol["workers"])
+    except Exception as e:
+        return {"status": "pending", "err": f"搜索出错:{str(e)[:40]}"}
+    g = search_group(q, res, anchor=anchor)
+    grp = next((x for x in (g.get("groups") or []) if x.get("anchor")), None)
+    if not grp or not grp.get("results"):
+        return {"status": "notfound", "err": "各站都没搜到这部"}
+    pick = pick_for_collect(grp["results"], want_res, strict)
+    if not pick:
+        # 有没有别的分辨率?有的话说清楚 —— 「没有4K」和「压根搜不到」是两回事
+        got = sorted({r.get("res") for r in map(parse_release, grp["results"]) if r.get("res")}, reverse=True)
+        return {"status": "nores", "err": ("站上只有 " + "/".join(f"{x}p" for x in got[:3]) + " 版本") if got
+                                          else "搜到的都判不出分辨率"}
+    return {"status": "ready", "err": "", "tmdb_id": tmdb_id or 0,
+            "tmdb_name": (grp.get("name") or ""), "res": pick.get("res") or 0,
+            "rel": pick["title"][:160], "site": pick.get("site") or "",
+            "size": pick.get("size") or 0, "url": pick.get("url") or ""}
+
+def collect_worker(want_res=1080, strict=True, expand_series=True, limit=0):
+    """把片单里 pending 的片子逐个查清楚(不推送,只查)。可断点续跑:
+       状态在库里,进程重启接着干,不会像老版那样「每次只扫描了一半」。"""
+    if _COL["running"]: return
+    _COL.update(running=True, stop=False, stage="扫描", done=0, msg="开始…")
+    def log(m):
+        _COL["msg"] = m; logmsg("INFO", "[收藏] " + m)
+    try:
+        ix = library_index()
+        n = 0
+        while not _COL["stop"]:
+            r = _led("SELECT id,src,title,year,tmdb_id FROM collect WHERE status='pending' "
+                     "ORDER BY (src='douban_top250') DESC, rank, id LIMIT 1", fetch="one")
+            if not r:
+                _COL["msg"] = "✅ 片单已全部查完"; break
+            row = {"id": r[0], "src": r[1], "title": r[2], "year": r[3], "tmdb_id": r[4]}
+            _COL["stage"] = row["title"][:30]
+            tot = (_led("SELECT COUNT(*) FROM collect", fetch="one") or [0])[0]
+            left = (_led("SELECT COUNT(*) FROM collect WHERE status='pending'", fetch="one") or [0])[0]
+            _COL.update(total=tot, done=tot - left)
+            try:
+                out = _collect_one(row, ix, want_res, strict, expand_series, log)
+            except Exception as e:
+                out = {"status": "pending", "err": f"异常:{str(e)[:40]}"}
+            _led("UPDATE collect SET status=?, err=?, tmdb_id=?, tmdb_name=?, res=?, rel=?, site=?, "
+                 "size=?, url=?, ts=? WHERE id=?",
+                 (out["status"], out.get("err", ""), int(out.get("tmdb_id") or row["tmdb_id"] or 0),
+                  out.get("tmdb_name", ""), int(out.get("res") or 0), out.get("rel", ""),
+                  out.get("site", ""), int(out.get("size") or 0), out.get("url", ""),
+                  int(time.time()), row["id"]))
+            n += 1
+            if limit and n >= limit:
+                _COL["msg"] = f"⏸ 已查 {n} 部(到达本次上限)"; break
+            time.sleep(1.2)          # 节流:别把站点当压测靶子
+    except Exception as e:
+        _COL["msg"] = f"⚠️ 出错: {str(e)[:60]}"
+        logmsg("ERROR", f"收藏扫描异常: {e}")
+    finally:
+        _COL.update(running=False, stage="")
+
+def collect_stats():
+    """片单概览 + **容量预估** —— 250 部 4K 电影是 7~15TB 的量级,
+       不先把这个数摆出来就闷头推任务,盘会被打满。"""
+    rows = _led("SELECT status, COUNT(*), SUM(size) FROM collect GROUP BY status", fetch="all") or []
+    d = {r[0]: {"n": r[1], "size": r[2] or 0} for r in rows}
+    ready = d.get("ready", {"n": 0, "size": 0})
+    free = 0
+    try: free = shutil.disk_usage("/data").free
+    except Exception: pass
+    return {"ok": True,
+            "total": sum(v["n"] for v in d.values()),
+            "by": {k: v["n"] for k, v in d.items()},
+            "ready_n": ready["n"], "ready_size": ready["size"],
+            "ready_sizeh": human_size(ready["size"]),
+            "free": free, "freeh": human_size(free),
+            "guard_gb": CFG["KEEP_MIN_FREE_GB"],
+            "fits": ready["size"] < max(0, free - CFG["KEEP_MIN_FREE_GB"] * 2**30),
+            "running": _COL["running"], "stage": _COL["stage"], "msg": _COL["msg"],
+            "done": _COL["done"], "scanning_total": _COL["total"]}
+
+def collect_push(ids=None, cap_gb=0):
+    """把查好的(ready)推给 qb。cap_gb 限制这一批的总量 —— 分批推,别一次把盘打满。
+       磁盘保护线照样生效:留不出 KEEP_MIN_FREE_GB 就不推。"""
+    sql = "SELECT id,title,year,rel,site,size,url FROM collect WHERE status='ready'"
+    args = []
+    if ids:
+        sql += " AND id IN (" + ",".join("?" * len(ids)) + ")"; args = [int(i) for i in ids]
+    sql += " ORDER BY rank, id"
+    rows = _led(sql, tuple(args), fetch="all") or []
+    if not rows: return {"ok": False, "err": "没有可推送的条目(先点「扫描片单」查片源)"}
+    try:
+        free = shutil.disk_usage("/data").free
+    except Exception:
+        free = 0
+    budget = max(0, free - CFG["KEEP_MIN_FREE_GB"] * 2**30)
+    if cap_gb: budget = min(budget, cap_gb * 2**30)
+    pushed, skipped, used = [], [], 0
+    qb = qb_conn()
+    for rid, title, year, rel, site, size, url in rows:
+        if used + (size or 0) > budget:
+            skipped.append({"title": title, "why": "本批容量已满"}); continue
+        try:
+            data = prowlarr_download(url)
+            if data[:1] != b'd': raise RuntimeError("拿回来的不是种子文件")
+            r = qb.add(data, category=CFG["QB_CATEGORY"] or "电影", tags="packseed,collect")
+            if "Ok" not in r: raise RuntimeError((r or "qb 拒绝")[:40])
+            _led("UPDATE collect SET status='pushed', ts=? WHERE id=?", (int(time.time()), rid))
+            pushed.append({"title": title, "sizeh": human_size(size)}); used += (size or 0)
+        except Exception as e:
+            _led("UPDATE collect SET err=? WHERE id=?", (str(e)[:60], rid))
+            skipped.append({"title": title, "why": str(e)[:40]})
+        time.sleep(max(CFG["SNATCH_DELAY"], 2))
+    if pushed:
+        logmsg("INFO", f"经典电影收藏:推送 {len(pushed)} 部,共 {human_size(used)}")
+        notify(f"🎬 已推送 {len(pushed)} 部电影", f"共 {human_size(used)},去下载页看进度")
+    return {"ok": True, "pushed": pushed, "skipped": skipped, "usedh": human_size(used)}
+
 # ============ 榜单批量下载 ============
 # 为什么是「一部一个种」而不是「一个大包」:
 #   ① 大包一个 TMDB 身份套几百部,识别必错,包内文件名不规范时事后拆不动(用户吃过这个亏);
@@ -5204,7 +5295,6 @@ CFG.setdefault("BATCH_SITES", os.environ.get("BATCH_SITES", "Keep Friends,M-Team
 CFG.setdefault("BATCH_MIN_GB", float(os.environ.get("BATCH_MIN_GB", "2")))
 CFG.setdefault("BATCH_MAX_GB", float(os.environ.get("BATCH_MAX_GB", "25")))
 
-_BJOBS = {}
 _AJOBS = {}
 def _ajob_run(jid, artist):
     job = _AJOBS[jid]
@@ -5216,67 +5306,6 @@ def _ajob_run(jid, artist):
         logmsg("ERROR", f"歌手专辑失败[{artist}]: {e}")
     job["fin"] = True
 
-def _pick_release(results, prefer_4k=False):
-    """从一堆候选里挑一个最适合收藏的。规则(按优先级):
-       ① 体积落在 BATCH_MIN_GB~MAX_GB 之间 —— 太小是渣画质,太大是原盘/REMUX 不适合批量囤;
-       ② 做种数越多越好 —— 既下得快,也说明是公认的好版本;
-       ③ 同做种数下优先 x265/HEVC(同画质体积小)。
-       返回 None 表示这批候选都不合适,宁可不下也不下垃圾。"""
-    lo, hi = CFG["BATCH_MIN_GB"] * 1024**3, CFG["BATCH_MAX_GB"] * 1024**3
-    cand = [parse_release(r) for r in results if lo <= (r.get("size") or 0) <= hi]
-    if not cand: return None
-    return max(cand, key=lambda r: score_release(r, "collect", prefer_4k))
-
-def _bjob_run(jid, col, total, prefer_4k):
-    job = _BJOBS[jid]
-    sites = [x for x in CFG["BATCH_SITES"].split(",") if x.strip()]
-    ix = library_index()
-    done = 0
-    try:
-        items = []
-        start = 0
-        while len(items) < total:
-            d = douban_shelf(col, start, min(50, total - len(items)))
-            got = d.get("items") or []
-            if not got: break
-            items.extend(got); start += len(got)
-        items = items[:total]
-        job["total"] = len(items)
-        for it in items:
-            if job.get("stop"): break
-            done += 1; job["done"] = done
-            job["cur"] = it["title"]
-            owned = owned_label(ix, "", 0, it["title"], it.get("year") or "")
-            if owned:
-                job["rows"].append({"title": it["title"], "year": it.get("year") or "",
-                                    "rate": it.get("rate") or "", "skip": "库里已有"})
-                continue
-            q = it["title"] + ((" " + it["year"]) if it.get("year") else "")
-            try:
-                name, year = split_query(q)
-                anchor = query_anchor(name, year, "movie")
-                res = prowlarr_search_fan([name], cats=FILTER_CATS["movie"], only=sites)
-                g = search_group(q, res, anchor=anchor)
-                grp = next((x for x in (g.get("groups") or []) if x.get("anchor")), None)
-                pick = _pick_release(grp["results"], prefer_4k) if grp else None
-            except Exception as e:
-                job["rows"].append({"title": it["title"], "year": it.get("year") or "",
-                                    "rate": it.get("rate") or "", "skip": f"搜索出错:{type(e).__name__}"})
-                continue
-            if not pick:
-                job["rows"].append({"title": it["title"], "year": it.get("year") or "",
-                                    "rate": it.get("rate") or "",
-                                    "skip": f"没有 {CFG['BATCH_MIN_GB']:g}~{CFG['BATCH_MAX_GB']:g}GB 的合适版本"})
-                continue
-            job["rows"].append({"title": it["title"], "year": it.get("year") or "",
-                                "rate": it.get("rate") or "", "tmdb": grp["name"],
-                                "rel": pick["title"], "site": pick["site"], "size": pick["sizeh"],
-                                "seeders": pick["seeders"], "url": pick["url"],
-                                "noxfer": noxfer(pick["title"])})
-            time.sleep(1.2)     # 节流:别把站点当压测靶子
-    except Exception as e:
-        job["err"] = str(e)[:120]
-    job["fin"] = True
 
 def batch_download(rows, cat=""):
     """把选中的种子推给 qb。逐个加、留间隔 —— 一秒钟几十个下载请求会被站点盯上。"""
@@ -6570,6 +6599,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(s):
         if s.path.startswith("/api/wecom"):
             s._wecom_post(); return
+        if s.path.startswith("/api/collect/push"):
+            if not s._auth_ok(): return
+            try:
+                ln = int(s.headers.get("Content-Length", "0"))
+                body = json.loads(s.rfile.read(ln).decode("utf-8", "ignore") or "{}")
+            except Exception:
+                body = {}
+            s._send_json(collect_push(body.get("ids"), float(body.get("cap_gb") or 0))); return
         if s.path.startswith("/api/stock/evict"):
             if not s._auth_ok(): return
             try:
@@ -6630,8 +6667,6 @@ class Handler(BaseHTTPRequestHandler):
             s._research(); return
         if s.path.startswith("/torrent"):
             s._detail(); return
-        if s.path.startswith("/api/douban"):
-            s._douban(); return
         if s.path.startswith("/api/dbimg"):
             s._dbimg(); return
         if s.path.startswith("/api/personcredits"):
@@ -6664,10 +6699,6 @@ class Handler(BaseHTTPRequestHandler):
             s._artist(); return
         if s.path.startswith("/api/artstat"):
             s._artstat(); return
-        if s.path.startswith("/api/batchplan"):
-            s._batchplan(); return
-        if s.path.startswith("/api/batchstat"):
-            s._batchstat(); return
         if s.path.startswith("/api/libaudit"):
             s._libaudit(); return
         if s.path.startswith("/api/libcat"):
@@ -6690,6 +6721,8 @@ class Handler(BaseHTTPRequestHandler):
             h = (parse_qs(urlparse(s.path).query).get("hash", [""])[0]).strip()
             c = db(); n = c.execute("UPDATE media SET status='skip' WHERE info_hash=? AND status='hold'", (h,)).rowcount; c.commit(); c.close()
             s._send_json({"ok": bool(n)}); return
+        if s.path.startswith("/api/collect/"):
+            s._collect(); return
         if s.path.startswith("/api/backfill"):
             if not _BACKFILL["running"]:
                 threading.Thread(target=backfill_ledger, daemon=True).start()
@@ -6954,16 +6987,56 @@ class Handler(BaseHTTPRequestHandler):
         pid = (parse_qs(urlparse(s.path).query).get("id",[""])[0]).strip()
         if not pid.isdigit(): s._send_json({"ok":False,"err":"人物 id 不合法"}); return
         s._send_json(tmdb_person_credits(int(pid)))
-    def _douban(s):
+    def _collect(s):
+        """经典电影收藏的几个动作。取片单 / 扫片源 / 看进度 / 列结果 / 重置。"""
         from urllib.parse import urlparse, parse_qs
-        qs = parse_qs(urlparse(s.path).query)
-        col = (qs.get("col", [""])[0]).strip()
-        st  = (qs.get("start", ["0"])[0]).strip()
-        start = int(st) if st.isdigit() and int(st) <= 200 else 0
-        try:
-            s._send_json(douban_shelf(col, start))
-        except Exception as e:
-            s._send_json({"ok": False, "err": str(e)[:80]})
+        p = urlparse(s.path).path; q = parse_qs(urlparse(s.path).query)
+        act = p[len("/api/collect/"):].strip("/")
+        if act == "stats":
+            s._send_json(collect_stats()); return
+        if act == "fetch":
+            def go():
+                try:
+                    _COL["msg"] = "正在取豆瓣 Top250…"
+                    rows = douban_top250(lambda m: _COL.update(msg=m))
+                    got = collect_add(rows, "douban_top250")
+                    _COL["msg"] = f"✅ 片单已就绪:抓到 {len(rows)} 部,新入队 {got} 部"
+                except Exception as e:
+                    _COL["msg"] = f"⚠️ 取片单失败: {str(e)[:60]}"
+            threading.Thread(target=go, daemon=True).start()
+            s._send_json({"ok": True}); return
+        if act == "scan":
+            res = int((q.get("res", ["1080"])[0]) or 1080)
+            strict = (q.get("strict", ["1"])[0]) != "0"
+            series = (q.get("series", ["1"])[0]) != "0"
+            lim = int((q.get("limit", ["0"])[0]) or 0)
+            if not _COL["running"]:
+                threading.Thread(target=collect_worker, args=(res, strict, series, lim), daemon=True).start()
+            s._send_json({"ok": True}); return
+        if act == "stop":
+            _COL["stop"] = True; s._send_json({"ok": True}); return
+        if act == "list":
+            st = (q.get("status", ["ready"])[0]).strip()
+            lim = max(1, min(500, int((q.get("limit", ["200"])[0]) or 200)))
+            rows = _led("SELECT id,src,rank,title,year,rate,tmdb_name,coll_name,status,res,rel,site,"
+                        "size,err FROM collect WHERE status=? ORDER BY (src='douban_top250') DESC, rank, id "
+                        "LIMIT ?", (st, lim), fetch="all") or []
+            k = ["id","src","rank","title","year","rate","tmdb_name","coll_name","status","res",
+                 "rel","site","size","err"]
+            out = []
+            for r in rows:
+                x = dict(zip(k, r)); x["sizeh"] = human_size(x["size"]); out.append(x)
+            s._send_json({"ok": True, "rows": out}); return
+        if act == "reset":
+            st = (q.get("status", [""])[0]).strip()
+            if st not in ("nores", "notfound", "pending", "ready", "owned", "pushed"):
+                s._send_json({"ok": False, "err": "不认识的状态"}); return
+            _led("UPDATE collect SET status='pending', err='' WHERE status=?", (st,))
+            s._send_json({"ok": True}); return
+        if act == "clear":
+            _led("DELETE FROM collect")
+            s._send_json({"ok": True}); return
+        s._send_json({"ok": False, "err": "未知动作"})
     def _dbimg(s):
         """豆瓣图片代理:豆瓣图床认 Referer,浏览器直连必然 403,只能自己带头去取。
            只放行豆瓣自家图床域名,免得这个端点被当成任意 URL 抓取器。"""
@@ -6998,24 +7071,6 @@ class Handler(BaseHTTPRequestHandler):
         if not j: s._send_json({"ok":False,"err":"任务不存在或已过期"}); return
         s._send_json({"ok":True,"fin":j["fin"],"log":j["log"][-6:],
                       "result": j["result"] if j["fin"] else None})
-    def _batchplan(s):
-        from urllib.parse import urlparse, parse_qs
-        q = parse_qs(urlparse(s.path).query)
-        col = (q.get("col",["classic"])[0]).strip()
-        n = int((q.get("n",["50"])[0]) or 50); n = max(1, min(n, 250))
-        p4k = (q.get("k",[""])[0]) == "1"
-        jid = str(int(time.time()*1000)) + "-" + base64.b16encode(os.urandom(2)).decode()
-        _BJOBS[jid] = {"rows": [], "done": 0, "total": n, "cur": "", "fin": False, "ts": time.time()}
-        threading.Thread(target=_bjob_run, args=(jid, col, n, p4k), daemon=True).start()
-        for k in [k for k, v in list(_BJOBS.items()) if time.time()-v["ts"] > 3600 and k != jid]:
-            _BJOBS.pop(k, None)
-        s._send_json({"ok": True, "id": jid})
-    def _batchstat(s):
-        from urllib.parse import urlparse, parse_qs
-        j = _BJOBS.get((parse_qs(urlparse(s.path).query).get("id",[""])[0]).strip())
-        if not j: s._send_json({"ok": False, "err": "任务不存在或已过期"}); return
-        s._send_json({"ok": True, "done": j["done"], "total": j["total"], "cur": j.get("cur",""),
-                      "fin": j["fin"], "err": j.get("err",""), "rows": j["rows"]})
     def _batchgo(s):
         try:
             n = int(s.headers.get("Content-Length") or 0)

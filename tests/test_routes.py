@@ -28,7 +28,8 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 ROUTES = ["/", "/api/dashboard", "/api/overview", "/api/downloads", "/api/gap", "/api/stock",
           "/api/health", "/api/libaudit", "/api/searchstat", "/api/settings", "/api/logs",
-          "/api/gapfill?hash=" + "f"*40, "/api/artstat", "/api/batchstat", "/api/ks/status"]
+          "/api/gapfill?hash=" + "f"*40, "/api/artstat", "/api/ks/status",
+          "/api/collect/stats", "/api/collect/list?status=ready", "/api/collect/stop"]
 fail = []
 for r in ROUTES:
     try:
